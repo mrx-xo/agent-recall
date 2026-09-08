@@ -153,9 +153,9 @@ def call_api(key, model, body_text, retries=4):
     raise RuntimeError(f"gave up after {retries} attempts: {last}")
 
 
-def process(path, key, model, max_chars, tally, verbose):
+def process(path, key, model, max_chars, tally, verbose, overwrite=False):
     dest = summary_path(path)
-    if dest.exists():
+    if dest.exists() and not overwrite:
         with tally.lock:
             tally.skipped += 1
         return
@@ -197,6 +197,36 @@ def process(path, key, model, max_chars, tally, verbose):
         print(f"  FAIL {path}: {exc}", flush=True)
 
 
+def select(everything, stale, idle_seconds):
+    """Split transcripts into what to summarize now and what is still live.
+
+    A transcript is never formally finished -- agent-shell appends to it for as
+    long as the conversation is resumed, days later included.  So "has no
+    summary" is the wrong test on its own: run it against a conversation in
+    progress and you freeze a summary of its opening three turns, which the
+    existence check then skips forever.  Idleness is the only end-of-session
+    signal there is, and a summary older than its transcript is stale by
+    definition.
+    """
+    now = time.time()
+    todo, live, fresh = [], [], 0
+    for path in everything:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        dest = summary_path(path)
+        exists = dest.exists()
+        if exists and not (stale and mtime > dest.stat().st_mtime):
+            fresh += 1
+            continue
+        if now - mtime < idle_seconds:
+            live.append(path)
+            continue
+        todo.append(path)
+    return todo, live, fresh
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", action="append", default=None,
@@ -206,16 +236,24 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="only process N transcripts")
     ap.add_argument("--max-chars", type=int, default=600_000,
                     help="skip transcripts larger than this after cleaning")
+    ap.add_argument("--idle-hours", type=float, default=6.0,
+                    help="leave transcripts touched within this many hours alone; "
+                         "they are still being written to (0 disables)")
+    ap.add_argument("--stale", action=argparse.BooleanOptionalAction, default=True,
+                    help="re-summarize when a transcript is newer than its summary")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     roots = args.root or [str(pathlib.Path.home())]
     everything = find_transcripts(roots)
-    todo = [p for p in everything if not summary_path(p).exists()]
+    idle_seconds = args.idle_hours * 3600
+    todo, live, fresh = select(everything, args.stale, idle_seconds)
 
     print(f"transcripts found : {len(everything):,}")
-    print(f"already summarized: {len(everything) - len(todo):,}")
+    print(f"already summarized: {fresh:,}")
+    print(f"still being written: {len(live):,}  "
+          f"(touched within {args.idle_hours:g}h)")
     print(f"to do             : {len(todo):,}")
 
     if args.dry_run:
@@ -252,7 +290,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for p in todo:
             pool.submit(process, p, key, args.model, args.max_chars,
-                        tally, not args.quiet)
+                        tally, not args.quiet, True)
 
     elapsed = time.time() - started
     print(f"\ndone {tally.done}  failed {tally.failed}  skipped {tally.skipped}")
