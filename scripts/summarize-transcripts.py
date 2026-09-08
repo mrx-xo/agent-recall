@@ -93,13 +93,27 @@ def summary_path(p):
 
 
 def find_transcripts(roots):
-    seen = []
+    """Return every transcript under ROOTS, once each.
+
+    The glob is anchored at `.agent-shell` with no leading `*/`: a
+    conversation started with cwd $HOME writes to ~/.agent-shell/transcripts,
+    which has no directory component before `.agent-shell` and was silently
+    invisible to a `*/.agent-shell/...` pattern.
+
+    Paths are resolved before de-duplication because agent-recall keeps a
+    directory of symlinks to every transcript dir, so the same file is
+    otherwise reached by several distinct paths and counted several times.
+    """
+    seen = set()
     for root in roots:
-        for p in pathlib.Path(root).rglob("*/.agent-shell/transcripts/*.md"):
+        for p in pathlib.Path(root).rglob(".agent-shell/transcripts/*.md"):
             if ".summary." in p.name:
                 continue
-            seen.append(p)
-    return sorted(set(seen))
+            try:
+                seen.add(p.resolve())
+            except OSError:
+                continue
+    return sorted(seen)
 
 
 class Tally:
