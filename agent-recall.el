@@ -92,6 +92,8 @@
 (declare-function agent-recall-consult--browse-read "agent-recall-consult")
 (declare-function agent-recall-consult--browse-preview-state "agent-recall-consult")
 (declare-function agent-recall-consult--suspend-available-p "agent-recall-consult")
+(declare-function agent-recall-consult--current-candidate "agent-recall-consult")
+(declare-function agent-recall-consult--lookup-candidate "agent-recall-consult" (candidate lookup))
 (declare-function ivy-read "ivy")
 (declare-function ivy-state-current "ivy")
 (declare-function ivy--get-window "ivy")
@@ -124,6 +126,11 @@
 (defface agent-recall-label
   '((t :inherit font-lock-keyword-face))
   "Face for user-assigned session labels in pickers and candidates."
+  :group 'agent-recall)
+
+(defface agent-recall-tag
+  '((t :inherit shadow))
+  "Face for catalogue #tags in picker candidates."
   :group 'agent-recall)
 
 (defface agent-recall-provider-anthropic
@@ -943,6 +950,85 @@ is nil, has no stored metadata, or the label is an empty string."
     (let ((label (agent-recall-metadata-get session-id 'label)))
       (and (stringp label) (not (string-empty-p label)) label))))
 
+;;;; Catalogue
+
+;; A catalogued session is an existing transcript flagged as "kept on
+;; purpose".  Nothing is copied: three keys ride along in the sidecar
+;; metadata next to `label' -- `catalogued' (ISO timestamp, presence
+;; means saved), `note' (why it was kept) and `tags' (lowercase strings,
+;; no leading #).  Pins are deliberately not stored here.
+
+(defun agent-recall--catalogue-normalize-tags (tags)
+  "Return TAGS as a deduplicated list of lowercase strings without #."
+  (let ((seen '()))
+    (dolist (tag tags)
+      (when (stringp tag)
+        (let ((clean (downcase (string-trim (string-remove-prefix "#" (string-trim tag))))))
+          (unless (or (string-empty-p clean) (member clean seen))
+            (push clean seen)))))
+    (nreverse seen)))
+
+(defun agent-recall-catalogue-put (session-id &rest args)
+  "Catalogue SESSION-ID, storing ARGS :note and :tags alongside it.
+Sets `catalogued' to the current ISO timestamp on first save and leaves
+it alone on later edits, so the save order is preserved.  An empty
+:note or :tags removes that key.  Returns the catalogue entry."
+  (when session-id
+    (let* ((note (plist-get args :note))
+           (tags (agent-recall--catalogue-normalize-tags (plist-get args :tags)))
+           (existing (agent-recall-metadata-get session-id 'catalogued)))
+      (agent-recall-metadata-merge
+       session-id
+       (list (cons 'catalogued (or existing (format-time-string "%FT%T%z")))
+             (cons 'note (and (stringp note) (not (string-empty-p note)) note))
+             (cons 'tags tags)))
+      (agent-recall-catalogue-get session-id))))
+
+(defun agent-recall-catalogue-remove (session-id)
+  "Uncatalogue SESSION-ID, dropping `catalogued' only.
+The note and tags survive so a later re-save restores them."
+  (when session-id
+    (agent-recall-metadata-put session-id 'catalogued nil)))
+
+(defun agent-recall-catalogue-get (session-id)
+  "Return SESSION-ID's catalogue entry, or nil when it is not catalogued.
+The entry is an alist with `catalogued', and `note' and `tags' when set."
+  (when-let* ((metadata (agent-recall-metadata session-id))
+              (stamp (alist-get 'catalogued metadata)))
+    (delq nil
+          (list (cons 'catalogued stamp)
+                (when-let ((note (alist-get 'note metadata)))
+                  (cons 'note note))
+                (when-let ((tags (alist-get 'tags metadata)))
+                  (cons 'tags tags))))))
+
+(defun agent-recall-catalogue-entries (&optional tag)
+  "Return (SESSION-ID . ENTRY) for every catalogued session, newest save first.
+With TAG, keep only entries carrying that exact tag."
+  (agent-recall--metadata-ensure)
+  (let ((entries '())
+        (tag (and tag (car (agent-recall--catalogue-normalize-tags (list tag))))))
+    (maphash (lambda (session-id metadata)
+               (when (and (alist-get 'catalogued metadata)
+                          (or (null tag)
+                              (member tag (alist-get 'tags metadata))))
+                 (push (cons session-id (agent-recall-catalogue-get session-id))
+                       entries)))
+             agent-recall--metadata)
+    (sort entries
+          (lambda (a b)
+            (string> (alist-get 'catalogued (cdr a))
+                     (alist-get 'catalogued (cdr b)))))))
+
+(defun agent-recall-catalogue-tags ()
+  "Return every tag in use across catalogued sessions, sorted."
+  (let ((tags '()))
+    (dolist (entry (agent-recall-catalogue-entries))
+      (dolist (tag (alist-get 'tags (cdr entry)))
+        (unless (member tag tags)
+          (push tag tags))))
+    (sort tags #'string<)))
+
 (defun agent-recall--label-suffix (session-id)
   "Return a propertized \"  LABEL\" display suffix for SESSION-ID.
 Returns an empty string when the session has no label, so callers
@@ -1613,13 +1699,17 @@ Use the canonical absolute path as a deterministic tie-breaker."
          a b (lambda (record) (or (nth 3 record) "")) #'string<))
        (_ (agent-recall--transcript-path-less-p a b))))))
 
-(defun agent-recall--list-transcripts ()
+(defun agent-recall--list-transcripts (&optional filter)
   "Return an alist of (DISPLAY-NAME . FILE-PATH) for all transcripts.
-Each entry also carries its timestamp for sorting."
+Each entry also carries its timestamp for sorting.  When FILTER is
+`catalogued', keep only transcripts whose session is catalogued."
   (agent-recall--index-ensure)
   (let ((transcripts '()))
     (maphash (lambda (file entry)
-               (when (file-exists-p file)
+               (when (and (file-exists-p file)
+                          (or (not (eq filter 'catalogued))
+                              (agent-recall-catalogue-get
+                               (plist-get entry :session-id))))
                  (let* ((file (agent-recall--canonical-file file))
                         (project (plist-get entry :project))
                         (ts (plist-get entry :timestamp))
@@ -1815,16 +1905,20 @@ right-hand description changes, to the summary topic where one exists."
       (agent-recall--browse-default candidates annotate-fn)))))
 
 ;;;###autoload
-(defun agent-recall-browse ()
+(defun agent-recall-browse (&optional catalogued)
   "Browse and open agent-shell transcripts.
 Presents a searchable list of all transcripts grouped by project.
 When `agent-recall-browse-preview' is non-nil, provides live preview
-using consult or ivy if available.  Falls back to plain `completing-read'."
-  (interactive)
+using consult or ivy if available.  Falls back to plain `completing-read'.
+With a prefix argument (CATALOGUED non-nil), show catalogued sessions only."
+  (interactive "P")
   (agent-recall--setup-embark)
-  (let* ((transcripts (agent-recall--list-transcripts)))
+  (let* ((transcripts (agent-recall--list-transcripts
+                       (and catalogued 'catalogued))))
     (unless transcripts
-      (user-error "No transcripts indexed.  Run M-x agent-recall-reindex"))
+      (if catalogued
+          (user-error "No catalogued transcripts.  Save one with M-x agent-recall-catalogue")
+        (user-error "No transcripts indexed.  Run M-x agent-recall-reindex")))
     (let* ((candidates (agent-recall--browse-candidates transcripts))
            (selection (agent-recall--read-browse-candidate candidates))
            (file (agent-recall--candidate-file selection)))
@@ -1880,6 +1974,143 @@ as `agent-recall-browse'."
       (user-error "No transcripts found for project \"%s\"" project))
     (let* ((candidates (agent-recall--browse-candidates transcripts))
            (selection (agent-recall--read-browse-candidate candidates))
+           (file (agent-recall--candidate-file selection)))
+      (when file
+        (agent-recall--open-transcript file)))))
+
+;;;; Catalogue commands
+
+(defun agent-recall--catalogue-session-id ()
+  "Return the session ID the catalogue commands should act on, or nil.
+Checks, in order: a transcript-mode buffer, a live agent-shell buffer,
+and the candidate highlighted in an active Browse picker."
+  (or (bound-and-true-p agent-recall--transcript-session-id)
+      (and (boundp 'agent-shell--state)
+           agent-shell--state
+           (condition-case nil
+               (or (map-nested-elt agent-shell--state '(:session :id))
+                   (map-elt agent-shell--state :resume-session-id))
+             (error nil)))
+      (when-let* ((lookup (and (minibufferp)
+                               (bound-and-true-p agent-recall-consult--picker-lookup)))
+                  (candidate (agent-recall-consult--lookup-candidate
+                              (agent-recall-consult--current-candidate) lookup))
+                  (file (agent-recall--candidate-file candidate)))
+        (agent-recall--resolve-session-id file))))
+
+(defun agent-recall--catalogue-tags-suffix (tags)
+  "Return a propertized \"  #a #b\" suffix for TAGS, or an empty string."
+  (if tags
+      (concat "  " (mapconcat (lambda (tag)
+                                (propertize (concat "#" tag) 'face 'agent-recall-tag))
+                              tags " "))
+    ""))
+
+(defun agent-recall--catalogue-transcripts (&optional tag)
+  "Return (DISPLAY . FILE) rows for catalogued sessions, newest save first.
+With TAG, keep only sessions carrying that exact tag.  Sessions whose
+transcript is no longer in the index are skipped."
+  (agent-recall--index-ensure)
+  (let ((by-session (make-hash-table :test 'equal)))
+    (maphash (lambda (file entry)
+               (when-let ((session-id (plist-get entry :session-id)))
+                 (when (file-exists-p file)
+                   (puthash session-id (cons file entry) by-session))))
+             agent-recall--index)
+    (delq nil
+          (mapcar
+           (lambda (row)
+             (when-let* ((session-id (car row))
+                         (hit (gethash session-id by-session))
+                         (file (agent-recall--canonical-file (car hit)))
+                         (entry (cdr hit)))
+               (cons (concat (agent-recall--provider-icon file entry)
+                             (format "[%s] " (plist-get entry :project))
+                             (propertize (agent-recall--display-timestamp
+                                          (plist-get entry :timestamp))
+                                         'face 'shadow)
+                             (agent-recall--label-suffix session-id)
+                             (agent-recall--catalogue-tags-suffix
+                              (alist-get 'tags (cdr row))))
+                     file)))
+           (agent-recall-catalogue-entries tag)))))
+
+(defun agent-recall--catalogue-annotation-function (candidates)
+  "Return an annotation function showing each candidate's catalogue note."
+  (lambda (candidate)
+    (when-let* ((original (or (agent-recall--candidate-lookup candidate candidates)
+                              candidate))
+                (file (agent-recall--candidate-file original))
+                (session-id (plist-get (agent-recall--index-entry-for-file file)
+                                       :session-id))
+                (note (alist-get 'note (agent-recall-catalogue-get session-id))))
+      (agent-recall--candidate-description file (concat "why: " note)))))
+
+(defun agent-recall--read-tags (initial)
+  "Prompt for tags with completion over tags in use, prefilled with INITIAL."
+  (completing-read-multiple
+   "Tags (comma separated): "
+   (agent-recall-catalogue-tags)
+   nil nil
+   (and initial (mapconcat (lambda (tag) (concat "#" tag)) initial ", "))))
+
+;;;###autoload
+(defun agent-recall-catalogue ()
+  "Catalogue the current chat: keep it on purpose, with a note and tags.
+Works from a live agent-shell buffer, a transcript-mode buffer, or the
+highlighted candidate of a Browse picker.  Editing an already catalogued
+session prefills the note and tags; both may be left empty."
+  (interactive)
+  (let ((session-id (agent-recall--catalogue-session-id)))
+    (unless session-id
+      (user-error "No session to catalogue here"))
+    (let* ((existing (agent-recall-catalogue-get session-id))
+           (note (read-string (if existing "Note (edit): " "Note (why keep this): ")
+                              (alist-get 'note existing)))
+           (tags (agent-recall--read-tags (alist-get 'tags existing))))
+      (agent-recall-catalogue-put session-id :note note :tags tags)
+      (when (bound-and-true-p agent-recall--transcript-session-id)
+        (force-mode-line-update))
+      (message "%s %s" (if existing "Catalogue updated for" "Catalogued")
+               (or (agent-recall-session-label session-id)
+                   (substring session-id 0 (min 8 (length session-id))))))))
+
+;;;###autoload
+(defun agent-recall-uncatalogue ()
+  "Remove the current chat from the catalogue.  Its note and tags are kept."
+  (interactive)
+  (let ((session-id (agent-recall--catalogue-session-id)))
+    (unless session-id
+      (user-error "No session to uncatalogue here"))
+    (unless (agent-recall-catalogue-get session-id)
+      (user-error "This session is not catalogued"))
+    (agent-recall-catalogue-remove session-id)
+    (when (bound-and-true-p agent-recall--transcript-session-id)
+      (force-mode-line-update))
+    (message "Uncatalogued %s"
+             (or (agent-recall-session-label session-id)
+                 (substring session-id 0 (min 8 (length session-id)))))))
+
+;;;###autoload
+(defun agent-recall-catalogue-browse (&optional tag)
+  "Browse catalogued sessions, newest save first.
+Same picker as `agent-recall-browse': RET visits the transcript, and
+embark `r' resumes.  With a prefix argument, prompt for a TAG and show
+only sessions carrying it."
+  (interactive
+   (list (and current-prefix-arg
+              (completing-read "Tag: " (agent-recall-catalogue-tags) nil t))))
+  (agent-recall--setup-embark)
+  (let ((transcripts (agent-recall--catalogue-transcripts tag)))
+    (unless transcripts
+      (user-error (if tag "No catalogued transcripts tagged #%s"
+                    "No catalogued transcripts.  Save one with M-x agent-recall-catalogue%s")
+                  (or tag "")))
+    (let* ((candidates (agent-recall--browse-candidates transcripts))
+           (selection
+            (cl-letf (((symbol-function 'agent-recall--browse-annotation-function)
+                       #'agent-recall--catalogue-annotation-function))
+              (agent-recall--read-browse-candidate candidates)))
            (file (agent-recall--candidate-file selection)))
       (when file
         (agent-recall--open-transcript file)))))
@@ -2000,6 +2231,7 @@ plain markdown buffer you can render with your preferred method."
     (define-key map (kbd "R") #'agent-recall-force-resume-current)
     (define-key map (kbd "c") #'agent-recall-clean-view)
     (define-key map (kbd "b") #'agent-recall-browse-from-transcript)
+    (define-key map (kbd "s") #'agent-recall-catalogue)
     (define-key map (kbd "q") #'agent-recall-quit-transcript)
     (define-key map (kbd "C-c C-n") #'agent-recall-next-user-message)
     (define-key map (kbd "C-c C-p") #'agent-recall-prev-user-message)
@@ -2025,6 +2257,7 @@ plain markdown buffer you can render with your preferred method."
     (kbd "gj") #'agent-recall-next-user-message
     (kbd "gk") #'agent-recall-prev-user-message
     (kbd "b") #'agent-recall-browse-from-transcript
+    (kbd "s") #'agent-recall-catalogue
     (kbd "q") #'agent-recall-quit-transcript))
 
 (defun agent-recall--header-entry (key label)
@@ -2049,6 +2282,13 @@ When SESSION-ID is non-nil, include a resume entry."
         (push (agent-recall--header-entry "R" "Force Resume") entries)))
     (push (agent-recall--header-entry "c" "Clean") entries)
     (push (agent-recall--header-entry "b" "Back") entries)
+    (let ((entry (and session-id (agent-recall-catalogue-get session-id))))
+      (push (agent-recall--header-entry
+             "s" (cond ((alist-get 'note entry)
+                        (format "Catalogued: %s" (alist-get 'note entry)))
+                       (entry "Catalogued")
+                       (t "Save")))
+            entries))
     (push (agent-recall--header-entry "C-j/C-k" "Navigate") entries)
     (push (agent-recall--header-entry "q" "Quit") entries)
     (concat "  " (mapconcat #'identity (nreverse entries) "  "))))
@@ -2972,11 +3212,19 @@ Results are displayed in the `*agent-recall-backfill*' buffer."
           (agent-recall--start-resume session-id file)
         (user-error "This transcript has no resumable session ID")))))
 
+(defun agent-recall-embark-catalogue (candidate)
+  "Catalogue transcript CANDIDATE's session."
+  (when-let* ((file (agent-recall--candidate-file candidate))
+              (session-id (agent-recall--resolve-session-id file)))
+    (let ((agent-recall--transcript-session-id session-id))
+      (agent-recall-catalogue))))
+
 (defvar agent-recall-transcript-embark-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "o") #'agent-recall-embark-open-other-window)
     (define-key map (kbd "r") #'agent-recall-embark-resume)
     (define-key map (kbd "R") #'agent-recall-embark-force-resume)
+    (define-key map (kbd "k") #'agent-recall-embark-catalogue)
     map)
   "Embark actions for agent-recall transcript candidates.")
 

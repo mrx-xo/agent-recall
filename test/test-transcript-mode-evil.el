@@ -71,7 +71,9 @@ buffer is left without evil and in `fundamental-mode'."
       (should (eq (key-binding (kbd "q")) #'agent-recall-quit-transcript))
       (should (eq (key-binding (kbd "C-j")) #'agent-recall-next-user-message))
       (should (eq (key-binding (kbd "gk")) #'agent-recall-prev-user-message))
-      (should (eq (key-binding (kbd "b")) #'agent-recall-browse-from-transcript)))))
+      (should (eq (key-binding (kbd "b")) #'agent-recall-browse-from-transcript))
+      ;; `s' is evil-snipe in the user's config; the mode map must win.
+      (should (eq (key-binding (kbd "s")) #'agent-recall-catalogue)))))
 
 (provide 'test-transcript-mode-evil)
 ;;; test-transcript-mode-evil.el ends here

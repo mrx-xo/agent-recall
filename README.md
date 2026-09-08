@@ -394,10 +394,32 @@ Evil users get additional bindings in normal state:
 | `agent-recall-claude-config-dir` | Claude CLI config directory for session matching |
 | `agent-recall-session-match-window` | Max seconds for timestamp matching (default: 120) |
 
+### Catalogue
+
+A catalogued session is one you kept on purpose: the existing transcript, flagged in the sidecar metadata store with an ISO timestamp, an optional note (why you kept it) and optional tags. Nothing is copied and nothing touches Emacs bookmarks. Uncataloguing drops the flag only, so the note and tags come back on a later re-save.
+
+- `agent-recall-catalogue` saves or edits. It resolves the session from a live agent-shell buffer, a transcript-mode buffer, or the highlighted candidate of a Browse picker, then prompts for the note and the tags (with completion over tags already in use). In transcript mode it is on `s`; on Browse candidates it is the embark action `k`.
+- `agent-recall-uncatalogue` removes the flag.
+- `agent-recall-catalogue-browse` lists catalogued sessions newest save first, with `#tags` on the row and the note as the annotation. A prefix argument narrows to one tag.
+- `agent-recall-browse` with a prefix argument shows catalogued sessions only.
+
+Programmatic API:
+
+```elisp
+(agent-recall-catalogue-put session-id :note "why" :tags '("syzygy" "resume"))
+(agent-recall-catalogue-remove session-id)     ; drops `catalogued' only
+(agent-recall-catalogue-get session-id)        ; alist or nil
+(agent-recall-catalogue-entries &optional tag) ; (session-id . entry), newest save first
+(agent-recall-catalogue-tags)                  ; every tag in use
+```
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `agent-recall-catalogue` | Keep this session on purpose, with a note and tags |
+| `agent-recall-uncatalogue` | Drop the catalogue flag (note and tags survive) |
+| `agent-recall-catalogue-browse` | Browse catalogued sessions, newest save first (`C-u`: by tag) |
 | `agent-recall-reindex` | Rebuild transcript index from filesystem |
 | `agent-recall-search` | Search all transcripts for a query |
 | `agent-recall-search-live` | Live-filtering search with auto backend selection |

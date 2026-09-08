@@ -222,5 +222,125 @@
       (should (equal "  wip" (substring-no-properties suffix)))
       (should (eq 'agent-recall-label (get-text-property 2 'face suffix))))))
 
+;; ---------------------------------------------------------------------------
+;; Catalogue
+;; ---------------------------------------------------------------------------
+
+(ert-deftest test-catalogue-put-get-roundtrip ()
+  "Cataloguing stores a timestamp, note, and tags under the session."
+  (with-temp-metadata-store
+    (should-not (agent-recall-catalogue-get test-md-session-id))
+    (agent-recall-catalogue-put test-md-session-id
+                                :note "why kept" :tags '("syzygy" "resume"))
+    (let ((entry (agent-recall-catalogue-get test-md-session-id)))
+      (should (stringp (alist-get 'catalogued entry)))
+      (should (equal "why kept" (alist-get 'note entry)))
+      (should (equal '("syzygy" "resume") (alist-get 'tags entry))))))
+
+(ert-deftest test-catalogue-uncatalogue-keeps-note-and-tags ()
+  "Uncataloguing should preserve the note and tags in metadata."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id
+                              :note "why kept" :tags '("syzygy" "resume"))
+    (agent-recall-catalogue-remove test-md-session-id)
+    (should-not (agent-recall-catalogue-get test-md-session-id))
+    (should (equal "why kept"
+                   (agent-recall-metadata-get test-md-session-id 'note)))
+    (should (equal '("syzygy" "resume")
+                   (agent-recall-metadata-get test-md-session-id 'tags)))))
+
+(ert-deftest test-catalogue-resave-refreshes-timestamp-edit-preserves-it ()
+  "Re-saving should set a fresh timestamp that later edits preserve."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id
+                              :note "why kept" :tags '("syzygy"))
+    (agent-recall-metadata-put test-md-session-id 'catalogued
+                               "2000-01-01T00:00:00+0000")
+    (agent-recall-catalogue-remove test-md-session-id)
+    (should-not (agent-recall-metadata-get test-md-session-id 'catalogued))
+    (agent-recall-catalogue-put test-md-session-id)
+    (should (agent-recall-catalogue-get test-md-session-id))
+    (let ((stamp (agent-recall-metadata-get test-md-session-id 'catalogued)))
+      (should (stringp stamp))
+      (should-not (equal "2000-01-01T00:00:00+0000" stamp))
+      (should-not (agent-recall-metadata-get test-md-session-id 'tags))
+      (cl-letf (((symbol-function 'format-time-string)
+                 (lambda (&rest _args) "2099-01-01T00:00:00+0000")))
+        (agent-recall-catalogue-put test-md-session-id :note "updated note"))
+      (should (equal "updated note"
+                     (agent-recall-metadata-get test-md-session-id 'note)))
+      (should (equal stamp
+                     (agent-recall-metadata-get test-md-session-id 'catalogued))))))
+
+(ert-deftest test-catalogue-entries-newest-first ()
+  "Entries should be ordered by descending catalogue timestamp."
+  (with-temp-metadata-store
+    (let ((id-01 test-md-session-id)
+          (id-03 "session-03")
+          (id-02 "session-02"))
+      (dolist (id (list id-01 id-03 id-02))
+        (agent-recall-catalogue-put id))
+      (agent-recall-metadata-put id-01 'catalogued "2026-09-01T00:00:00+0000")
+      (agent-recall-metadata-put id-03 'catalogued "2026-09-03T00:00:00+0000")
+      (agent-recall-metadata-put id-02 'catalogued "2026-09-02T00:00:00+0000")
+      (should (equal (list id-03 id-02 id-01)
+                     (mapcar #'car (agent-recall-catalogue-entries)))))))
+
+(ert-deftest test-catalogue-entries-filtered-by-exact-tag ()
+  "Tag filtering should normalize a leading # and require an exact match."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id :tags '("syzygy" "resume"))
+    (agent-recall-catalogue-put "other-session" :tags '("dotfiles"))
+    (should (equal (list test-md-session-id)
+                   (mapcar #'car (agent-recall-catalogue-entries "syzygy"))))
+    (should (equal (list test-md-session-id)
+                   (mapcar #'car (agent-recall-catalogue-entries "#syzygy"))))
+    (should-not (agent-recall-catalogue-entries "syz"))))
+
+(ert-deftest test-catalogue-tags-normalised ()
+  "Stored tags should be trimmed, lowercase, nonempty, and deduplicated."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id
+                              :tags '("#Syzygy" " resume " "syzygy" ""))
+    (should (equal '("syzygy" "resume")
+                   (agent-recall-metadata-get test-md-session-id 'tags)))))
+
+(ert-deftest test-catalogue-tags-sorted-union ()
+  "Tags should form a sorted union of catalogued sessions only."
+  (with-temp-metadata-store
+    (should-not (agent-recall-catalogue-tags))
+    (agent-recall-catalogue-put test-md-session-id :tags '("syzygy" "resume"))
+    (agent-recall-catalogue-put "other-session" :tags '("resume" "dotfiles"))
+    (should (equal '("dotfiles" "resume" "syzygy")
+                   (agent-recall-catalogue-tags)))
+    (agent-recall-catalogue-remove test-md-session-id)
+    (should (equal '("dotfiles" "resume") (agent-recall-catalogue-tags)))
+    (agent-recall-catalogue-remove "other-session")
+    (should-not (agent-recall-catalogue-tags))))
+
+(ert-deftest test-catalogue-empty-note-removes-key ()
+  "An empty note should remove the note key from an existing entry."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id :note "why kept")
+    (agent-recall-catalogue-put test-md-session-id :note "")
+    (let ((entry (agent-recall-catalogue-get test-md-session-id)))
+      (should entry)
+      (should-not (assq 'note entry)))
+    (should-not (assq 'note (agent-recall-metadata test-md-session-id)))))
+
+(ert-deftest test-catalogue-get-uncatalogued-stray-note ()
+  "A stray note should not make an uncatalogued session a catalogue entry."
+  (with-temp-metadata-store
+    (agent-recall-metadata-put test-md-session-id 'note "stray note")
+    (should-not (agent-recall-catalogue-get test-md-session-id))))
+
+(ert-deftest test-catalogue-remove-get-nil-or-unknown-session ()
+  "Removing or getting nil and unknown session IDs should return nil."
+  (with-temp-metadata-store
+    (dolist (id '(nil "unknown-session"))
+      (should-not (agent-recall-catalogue-get id))
+      (should-not (agent-recall-catalogue-remove id))
+      (should-not (agent-recall-catalogue-get id)))))
+
 (provide 'test-metadata)
 ;;; test-metadata.el ends here
