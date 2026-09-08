@@ -249,28 +249,39 @@
     (should (equal '("syzygy" "resume")
                    (agent-recall-metadata-get test-md-session-id 'tags)))))
 
-(ert-deftest test-catalogue-resave-refreshes-timestamp-edit-preserves-it ()
-  "Re-saving should set a fresh timestamp that later edits preserve."
+(ert-deftest test-catalogue-resave-restores-note-and-tags ()
+  "After uncatalogue, a bare re-save brings the old note and tags back.
+Omitted :note/:tags keep what is stored; an explicit empty value clears."
   (with-temp-metadata-store
     (agent-recall-catalogue-put test-md-session-id
-                              :note "why kept" :tags '("syzygy"))
-    (agent-recall-metadata-put test-md-session-id 'catalogued
-                               "2000-01-01T00:00:00+0000")
+                                :note "why kept" :tags '("syzygy"))
     (agent-recall-catalogue-remove test-md-session-id)
-    (should-not (agent-recall-metadata-get test-md-session-id 'catalogued))
+    (let ((entry (agent-recall-catalogue-put test-md-session-id)))
+      (should (equal "why kept" (alist-get 'note entry)))
+      (should (equal '("syzygy") (alist-get 'tags entry))))
+    ;; Explicit empties clear.
+    (agent-recall-catalogue-put test-md-session-id :note "" :tags nil)
+    (let ((entry (agent-recall-catalogue-get test-md-session-id)))
+      (should entry)
+      (should-not (alist-get 'note entry))
+      (should-not (alist-get 'tags entry)))))
+
+(ert-deftest test-catalogue-edit-preserves-timestamp ()
+  "Editing a catalogued session keeps its original save timestamp."
+  (with-temp-metadata-store
+    (agent-recall-catalogue-put test-md-session-id :note "first")
+    (agent-recall-metadata-put test-md-session-id 'catalogued "2000-01-01T00:00:00Z")
+    (agent-recall-catalogue-put test-md-session-id :note "second")
+    (should (equal "2000-01-01T00:00:00Z"
+                   (agent-recall-metadata-get test-md-session-id 'catalogued)))
+    (should (equal "second" (agent-recall-metadata-get test-md-session-id 'note)))))
+
+(ert-deftest test-catalogue-timestamp-is-utc ()
+  "Save timestamps are UTC so lexicographic order survives DST changes."
+  (with-temp-metadata-store
     (agent-recall-catalogue-put test-md-session-id)
-    (should (agent-recall-catalogue-get test-md-session-id))
-    (let ((stamp (agent-recall-metadata-get test-md-session-id 'catalogued)))
-      (should (stringp stamp))
-      (should-not (equal "2000-01-01T00:00:00+0000" stamp))
-      (should-not (agent-recall-metadata-get test-md-session-id 'tags))
-      (cl-letf (((symbol-function 'format-time-string)
-                 (lambda (&rest _args) "2099-01-01T00:00:00+0000")))
-        (agent-recall-catalogue-put test-md-session-id :note "updated note"))
-      (should (equal "updated note"
-                     (agent-recall-metadata-get test-md-session-id 'note)))
-      (should (equal stamp
-                     (agent-recall-metadata-get test-md-session-id 'catalogued))))))
+    (should (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9:]\\{8\\}Z\\'"
+                            (agent-recall-metadata-get test-md-session-id 'catalogued)))))
 
 (ert-deftest test-catalogue-entries-newest-first ()
   "Entries should be ordered by descending catalogue timestamp."

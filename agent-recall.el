@@ -970,18 +970,25 @@ is nil, has no stored metadata, or the label is an empty string."
 
 (defun agent-recall-catalogue-put (session-id &rest args)
   "Catalogue SESSION-ID, storing ARGS :note and :tags alongside it.
-Sets `catalogued' to the current ISO timestamp on first save and leaves
-it alone on later edits, so the save order is preserved.  An empty
-:note or :tags removes that key.  Returns the catalogue entry."
+Sets `catalogued' to the current UTC timestamp on first save and leaves
+it alone on later edits, so the save order is preserved.  An omitted
+:note or :tags keeps whatever is stored, which is how a re-save after
+`agent-recall-catalogue-remove' restores them; an explicit empty value
+removes that key.  Returns the catalogue entry."
   (when session-id
-    (let* ((note (plist-get args :note))
-           (tags (agent-recall--catalogue-normalize-tags (plist-get args :tags)))
-           (existing (agent-recall-metadata-get session-id 'catalogued)))
-      (agent-recall-metadata-merge
-       session-id
-       (list (cons 'catalogued (or existing (format-time-string "%FT%T%z")))
-             (cons 'note (and (stringp note) (not (string-empty-p note)) note))
-             (cons 'tags tags)))
+    (let* ((existing (agent-recall-metadata-get session-id 'catalogued))
+           (changes (list (cons 'catalogued
+                                (or existing
+                                    (format-time-string "%FT%TZ" nil t))))))
+      (when (plist-member args :note)
+        (let ((note (plist-get args :note)))
+          (push (cons 'note (and (stringp note) (not (string-empty-p note)) note))
+                changes)))
+      (when (plist-member args :tags)
+        (push (cons 'tags (agent-recall--catalogue-normalize-tags
+                           (plist-get args :tags)))
+              changes))
+      (agent-recall-metadata-merge session-id changes)
       (agent-recall-catalogue-get session-id))))
 
 (defun agent-recall-catalogue-remove (session-id)
@@ -2052,7 +2059,7 @@ transcript is no longer in the index are skipped."
    "Tags (comma separated): "
    (agent-recall-catalogue-tags)
    nil nil
-   (and initial (mapconcat (lambda (tag) (concat "#" tag)) initial ", "))))
+   (and initial (mapconcat #'identity initial ", "))))
 
 ;;;###autoload
 (defun agent-recall-catalogue ()
@@ -2064,10 +2071,13 @@ session prefills the note and tags; both may be left empty."
   (let ((session-id (agent-recall--catalogue-session-id)))
     (unless session-id
       (user-error "No session to catalogue here"))
+    ;; Prefill from the raw metadata, not the catalogue entry: after an
+    ;; uncatalogue the note and tags are still stored and must come back.
     (let* ((existing (agent-recall-catalogue-get session-id))
            (note (read-string (if existing "Note (edit): " "Note (why keep this): ")
-                              (alist-get 'note existing)))
-           (tags (agent-recall--read-tags (alist-get 'tags existing))))
+                              (agent-recall-metadata-get session-id 'note)))
+           (tags (agent-recall--read-tags
+                  (agent-recall-metadata-get session-id 'tags))))
       (agent-recall-catalogue-put session-id :note note :tags tags)
       (when (bound-and-true-p agent-recall--transcript-session-id)
         (force-mode-line-update))
