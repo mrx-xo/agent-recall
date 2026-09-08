@@ -447,6 +447,44 @@ returned unchanged."
                   (match-string 1 file))
         file))))
 
+(defvar agent-recall--summary-topic-cache (make-hash-table :test 'equal)
+  "Cache mapping a summary file to (MTIME . TOPIC).
+Pickers ask for a topic once per visible candidate per keystroke, so the
+sidecar is read once and re-read only when it changes on disk.")
+
+(defun agent-recall--summary-topic (transcript-file)
+  "Return the Topic line from TRANSCRIPT-FILE's summary sidecar, or nil.
+The sidecar's `**Topic:**' line describes what a conversation was about,
+which is what a picker wants on the right-hand side.  The indexed
+`:preview' is the first user message instead -- often a greeting, a
+pasted error, or \"ok do it\", none of which identify the session."
+  (when transcript-file
+    (let ((summary (agent-recall--summary-file transcript-file)))
+      (when (file-readable-p summary)
+        (let* ((mtime (file-attribute-modification-time
+                       (file-attributes summary)))
+               (cached (gethash summary agent-recall--summary-topic-cache)))
+          (if (and cached (equal (car cached) mtime))
+              (cdr cached)
+            (let ((topic (with-temp-buffer
+                           (insert-file-contents summary nil 0 2000)
+                           (goto-char (point-min))
+                           (when (re-search-forward
+                                  "^\\*\\*Topic:\\*\\*[ \t]*\\(.+?\\)[ \t]*$" nil t)
+                             (let ((text (match-string 1)))
+                               (unless (string-empty-p text)
+                                 (truncate-string-to-width text 90)))))))
+              (puthash summary (cons mtime topic)
+                       agent-recall--summary-topic-cache)
+              topic)))))))
+
+(defun agent-recall--candidate-description (file fallback)
+  "Return the picker annotation for transcript FILE.
+Prefers its summary topic, falling back to FALLBACK (the indexed preview)."
+  (let ((text (or (agent-recall--summary-topic file) fallback)))
+    (when (and text (not (string-empty-p text)))
+      (concat "  " text))))
+
 (defun agent-recall--candidate-key (candidate)
   "Return the property-free completion identity for CANDIDATE."
   (and candidate (substring-no-properties candidate)))
@@ -1200,23 +1238,43 @@ searched separately via `agent-recall-search-summaries'."
             (push file files)))))
     (delete-dups files)))
 
+(defconst agent-recall--summary-glob "*.summary.*"
+  "Wildcard matching the summary sidecar written beside a transcript.")
+
+(defvar agent-recall--search-scope 'transcripts
+  "Which files the search command currently running targets.
+`transcripts' searches transcripts and excludes summary sidecars.
+`summaries' searches only sidecars, i.e. TIMESTAMP.summary.md.
+Bound by `agent-recall-search-summaries'; every backend reads it
+through `agent-recall--scoped-globs'.")
+
+(defun agent-recall--scoped-globs ()
+  "Return ripgrep --glob arguments as a list, for `agent-recall--search-scope'.
+Summaries are sidecars that also match `agent-recall-file-patterns', so a
+transcript search which does not exclude them reports every hit twice."
+  (if (eq agent-recall--search-scope 'summaries)
+      (list "--glob" agent-recall--summary-glob)
+    (append (cl-mapcan (lambda (pat) (list "--glob" pat))
+                       (agent-recall--file-patterns))
+            (list "--glob" (concat "!" agent-recall--summary-glob)))))
+
 (defun agent-recall--file-patterns-as-includes ()
-  "Return `agent-recall-file-patterns' as grep --include arguments."
-  (concat (mapconcat (lambda (pat)
-                       (format "--include=%s" (shell-quote-argument pat)))
-                     (agent-recall--file-patterns) " ")
-          " --exclude=*.summary.*"))
+  "Return grep --include/--exclude arguments for the current search scope."
+  (if (eq agent-recall--search-scope 'summaries)
+      (format "--include=%s" (shell-quote-argument agent-recall--summary-glob))
+    (concat (mapconcat (lambda (pat)
+                         (format "--include=%s" (shell-quote-argument pat)))
+                       (agent-recall--file-patterns) " ")
+            (format " --exclude=%s"
+                    (shell-quote-argument agent-recall--summary-glob)))))
 
 (defun agent-recall--file-patterns-as-globs ()
-  "Return `agent-recall-file-patterns' as ripgrep --glob arguments.
+  "Return ripgrep --glob arguments for the current search scope, as a string.
 The result is appended to `consult-ripgrep-args' (a whitespace-separated
 argument string parsed by `consult--build-args'), so patterns must not
-be shell-quoted — `shell-quote-argument' would leave a literal
+be shell-quoted -- `shell-quote-argument' would leave a literal
 backslash in the argv (e.g. \"\\\\*.md\"), and ripgrep would match nothing."
-  (concat (mapconcat (lambda (pat)
-                       (format "--glob %s" pat))
-                     (agent-recall--file-patterns) " ")
-          " --glob !*.summary.*"))
+  (mapconcat #'identity (agent-recall--scoped-globs) " "))
 
 ;;;; Search
 
@@ -1349,7 +1407,9 @@ DIRS are unused; deadgrep searches the symlink directory instead."
   (unless (fboundp 'deadgrep)
     (user-error "Deadgrep is not installed.  Install it or set `agent-recall-search-function' to `grep'"))
   (let ((dir (agent-recall--ensure-symlink-dir))
-        (deadgrep-extra-arguments (append (bound-and-true-p deadgrep-extra-arguments) '("--follow"))))
+        (deadgrep-extra-arguments (append (bound-and-true-p deadgrep-extra-arguments)
+                                          '("--follow")
+                                          (agent-recall--scoped-globs))))
     (deadgrep query dir)
     (when agent-recall-auto-transcript-mode
       (agent-recall--install-transcript-hook)
@@ -1365,8 +1425,7 @@ DIRS are unused; counsel-rg searches the symlink directory instead."
           (append (list "rg" "--max-columns" "240" "--with-filename"
                         "--no-heading" "--line-number" "--color" "never"
                         "--follow")
-                  (cl-mapcan (lambda (pat) (list "--glob" pat))
-                             (agent-recall--file-patterns))
+                  (agent-recall--scoped-globs)
                   (list "%s"))))
     (counsel-rg query dir "" "Recall: ")
     (when (and agent-recall-auto-transcript-mode
@@ -1473,6 +1532,23 @@ The search backend is controlled by `agent-recall-search-function'."
       ('counsel-rg       (agent-recall--search-via-counsel-rg query dirs))
       ('consult-ripgrep  (agent-recall--search-via-consult-ripgrep query dirs))
       (_                 (agent-recall--search-via-grep query dirs)))))
+
+;;;###autoload
+(defun agent-recall-search-summaries (query)
+  "Search only transcript summaries for QUERY.
+Summaries are the TIMESTAMP.summary.md sidecars produced by
+`agent-recall-summarize' or by scripts/summarize-transcripts.py, and
+hold a Topic/Problem/Outcome/Tags block per conversation.  Searching
+them instead of the raw transcripts trades recall for precision: one
+hit per conversation, in the summary's own words, with no tool calls
+or pasted output in the way.
+
+The backend is `agent-recall-search-function', as in
+`agent-recall-search'.  Falls back to nothing useful when no summaries
+exist yet, so run `agent-recall-summarize' first."
+  (interactive "sSearch summaries: ")
+  (let ((agent-recall--search-scope 'summaries))
+    (agent-recall-search query)))
 
 ;;;###autoload
 (defun agent-recall-search-live ()
@@ -1706,16 +1782,16 @@ Returns the selected candidate string, or nil."
         found)))
 
 (defun agent-recall--browse-annotation-function (candidates)
-  "Return a preview annotation function for CANDIDATES."
+  "Return a preview annotation function for CANDIDATES.
+The candidate itself keeps carrying project, date, and label; only the
+right-hand description changes, to the summary topic where one exists."
   (lambda (candidate)
     (when-let* ((original (or (agent-recall--candidate-lookup
                                candidate candidates)
                               candidate))
-                (file (agent-recall--candidate-file original))
-                (entry (agent-recall--index-entry-for-file file))
-                (preview (plist-get entry :preview))
-                ((not (string-empty-p preview))))
-      (concat "  " preview))))
+                (file (agent-recall--candidate-file original)))
+      (agent-recall--candidate-description
+       file (plist-get (agent-recall--index-entry-for-file file) :preview)))))
 
 (defun agent-recall--consult-picker-available-p ()
   "Return non-nil when Browse should use the Consult adapter."
@@ -2310,9 +2386,8 @@ Only shows transcripts that have resolvable session IDs."
                                (annotation-function
                                 . ,(lambda (candidate)
                                      (when-let ((entry (assoc candidate resumable)))
-                                       (let ((preview (nth 3 entry)))
-                                         (when (and preview (not (string-empty-p preview)))
-                                           (concat "  " preview)))))))
+                                       (agent-recall--candidate-description
+                                        (nth 1 entry) (nth 3 entry))))))
                            (complete-with-action
                             action (mapcar #'car resumable) string pred)))
                        nil t))

@@ -12,3 +12,4 @@
 .mcp.json
 .taskmaster/
 /CLAUDE.md
+__pycache__/
