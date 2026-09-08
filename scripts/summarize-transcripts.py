@@ -168,7 +168,11 @@ def process(path, key, model, max_chars, tally, verbose, overwrite=False):
         if len(body) > max_chars:
             with tally.lock:
                 tally.skipped += 1
-            print(f"  skip (too big, {len(body):,} chars): {path.name}", flush=True)
+            # Oversized transcripts never gain a summary, so they are skipped
+            # again on every run. Naming each one nightly would bury the log.
+            if verbose:
+                print(f"  skip (too big, {len(body):,} chars): {path.name}",
+                      flush=True)
             return
 
         resp = call_api(key, model, body)
