@@ -134,5 +134,77 @@ Binds `file-a' (session `id-a', project alpha, newer) and `file-b'
       (setq-local agent-shell--state `((:session . ((:id . ,id-b)))))
       (should (equal id-b (agent-recall--catalogue-session-id))))))
 
+;;;; Regressions
+
+(ert-deftest test-catalogue-resume-chain-shows-newest-transcript ()
+  "A session resumed several times shows its newest sitting, not any of them.
+
+`maphash' has no defined order, so a chain used to resolve to whichever
+file happened to be visited last: the row on screen described one
+transcript and RET opened another.  Both insertion orders are asserted,
+because a single order can pick the newest by luck."
+  (dolist (reversed '(nil t))
+    (with-catalogue-fixture
+      (let* ((older (expand-file-name "2026-08-01-09-00-00.md" dir))
+             (newer (expand-file-name "2026-09-09-09-00-00.md" dir))
+             (chain (list (cons older "2026-08-01-09-00-00")
+                          (cons newer "2026-09-09-09-00-00"))))
+        (dolist (pair chain)
+          (with-temp-file (car pair) (insert "## User (1)\n\nresumed\n")))
+        ;; Same session id as file-a: one conversation, three transcripts.
+        (dolist (pair (if reversed (reverse chain) chain))
+          (puthash (car pair)
+                   (list :project "alpha" :dir dir :timestamp (cdr pair)
+                         :session-id id-a :preview "resumed")
+                   agent-recall--index))
+        (agent-recall-catalogue-put id-a :note "keep")
+        (let ((rows (agent-recall--catalogue-transcripts)))
+          (should (= 1 (length rows)))
+          (should (equal newer (cdr (car rows)))))))))
+
+(ert-deftest test-catalogue-note-outranks-the-summary-topic ()
+  "The note is why the session was kept, so it beats the summary topic."
+  (with-catalogue-fixture
+    (with-temp-file (agent-recall--summary-file file-a)
+      (insert "**Topic:** Something the summarizer decided\n"))
+    (clrhash agent-recall--summary-topic-cache)
+    (agent-recall-catalogue-put id-a :note "the perf fix that worked")
+    (let* ((candidates (agent-recall--browse-candidates
+                        (agent-recall--catalogue-transcripts)))
+           (annotate (agent-recall--catalogue-annotation-function candidates)))
+      (should (equal "  why: the perf fix that worked"
+                     (funcall annotate (car candidates)))))))
+
+(ert-deftest test-catalogue-without-a-note-still-annotates ()
+  "A catalogued session with no note keeps its ordinary annotation."
+  (with-catalogue-fixture
+    (with-temp-file (agent-recall--summary-file file-a)
+      (insert "**Topic:** Something the summarizer decided\n"))
+    (clrhash agent-recall--summary-topic-cache)
+    (agent-recall-catalogue-put id-a)
+    (let* ((candidates (agent-recall--browse-candidates
+                        (agent-recall--catalogue-transcripts)))
+           (annotate (agent-recall--catalogue-annotation-function candidates)))
+      (should (equal "  Something the summarizer decided"
+                     (funcall annotate (car candidates)))))))
+
+(ert-deftest test-header-entry-escapes-percent ()
+  "A label reaches `header-line-format', where % is a mode-line construct."
+  (let ((entry (agent-recall--header-entry "s" "Catalogued: cut latency 50% on startup")))
+    (should (string-match-p "50%% on startup" entry))
+    (should-not (string-match-p "50% on" entry)))
+  ;; %b would otherwise inject the buffer name into the header.
+  (should (string-match-p "%%b" (agent-recall--header-entry "s" "note %b"))))
+
+(ert-deftest test-embark-catalogue-without-session-id-errors ()
+  "`k' on a pre-session-id transcript says so instead of doing nothing."
+  (with-catalogue-fixture
+    (cl-letf (((symbol-function 'agent-recall--resolve-session-id)
+               (lambda (&rest _) nil))
+              ((symbol-function 'agent-recall--candidate-file)
+               (lambda (&rest _) file-a)))
+      (should-error (agent-recall-embark-catalogue "anything")
+                    :type 'user-error))))
+
 (provide 'test-catalogue)
 ;;; test-catalogue.el ends here

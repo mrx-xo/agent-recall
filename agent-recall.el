@@ -485,10 +485,15 @@ pasted error, or \"ok do it\", none of which identify the session."
                        agent-recall--summary-topic-cache)
               topic)))))))
 
-(defun agent-recall--candidate-description (file fallback)
+(defun agent-recall--candidate-description (file fallback &optional override)
   "Return the picker annotation for transcript FILE.
-Prefers its summary topic, falling back to FALLBACK (the indexed preview)."
-  (let ((text (or (agent-recall--summary-topic file) fallback)))
+OVERRIDE, when non-empty, wins outright: it is something the picker knows
+that no summary can supply, such as why a session was catalogued.
+Otherwise the summary topic is preferred over FALLBACK, the indexed
+preview, which is only ever the first user message."
+  (let ((text (or (and override (not (string-empty-p override)) override)
+                  (agent-recall--summary-topic file)
+                  fallback)))
     (when (and text (not (string-empty-p text)))
       (concat "  " text))))
 
@@ -2022,7 +2027,17 @@ transcript is no longer in the index are skipped."
     (maphash (lambda (file entry)
                (when-let ((session-id (plist-get entry :session-id)))
                  (when (file-exists-p file)
-                   (puthash session-id (cons file entry) by-session))))
+                   (let ((prev (gethash session-id by-session)))
+                     ;; A resumed conversation writes a fresh transcript under
+                     ;; the same session id.  `maphash' has no defined order,
+                     ;; so without keeping the newest the browser shows an
+                     ;; arbitrary sitting and RET opens a different file than
+                     ;; the line on screen describes.  `:timestamp' is the
+                     ;; zero-padded basename, so it sorts chronologically.
+                     (when (or (null prev)
+                               (string> (or (plist-get entry :timestamp) "")
+                                        (or (plist-get (cdr prev) :timestamp) "")))
+                       (puthash session-id (cons file entry) by-session))))))
              agent-recall--index)
     (delq nil
           (mapcar
@@ -2043,15 +2058,21 @@ transcript is no longer in the index are skipped."
            (agent-recall-catalogue-entries tag)))))
 
 (defun agent-recall--catalogue-annotation-function (candidates)
-  "Return an annotation function showing each candidate's catalogue note."
+  "Return an annotation function showing each candidate's catalogue note.
+A note is the whole reason the session was kept, so it outranks the summary
+topic.  Without one the row still annotates, falling back the usual way."
   (lambda (candidate)
     (when-let* ((original (or (agent-recall--candidate-lookup candidate candidates)
                               candidate))
                 (file (agent-recall--candidate-file original))
-                (session-id (plist-get (agent-recall--index-entry-for-file file)
-                                       :session-id))
-                (note (alist-get 'note (agent-recall-catalogue-get session-id))))
-      (agent-recall--candidate-description file (concat "why: " note)))))
+                (entry (agent-recall--index-entry-for-file file)))
+      (let* ((session-id (plist-get entry :session-id))
+             (note (and session-id
+                        (alist-get 'note (agent-recall-catalogue-get session-id)))))
+        (agent-recall--candidate-description
+         file
+         (plist-get entry :preview)
+         (and note (not (string-empty-p note)) (concat "why: " note)))))))
 
 (defun agent-recall--read-tags (initial)
   "Prompt for tags with completion over tags in use, prefilled with INITIAL."
@@ -2271,10 +2292,15 @@ plain markdown buffer you can render with your preferred method."
     (kbd "q") #'agent-recall-quit-transcript))
 
 (defun agent-recall--header-entry (key label)
-  "Format a header line entry with KEY highlighted and LABEL dimmed."
+  "Format a header line entry with KEY highlighted and LABEL dimmed.
+LABEL has its % escaped: this lands in `header-line-format', where % is a
+mode-line construct, and labels carry user text -- a catalogue note, a
+buffer name.  Unescaped, \"cut latency 50% on startup\" renders as
+\"cut latency 50on startup\", and %b or %f inject buffer name or path."
   (concat (propertize key 'face 'agent-recall-header-key)
           " "
-          (propertize label 'face 'agent-recall-header-label)))
+          (propertize (string-replace "%" "%%" label)
+                      'face 'agent-recall-header-label)))
 
 (defun agent-recall--header-line (&optional session-id)
   "Build the header line string for transcript mode.
@@ -3224,10 +3250,15 @@ Results are displayed in the `*agent-recall-backfill*' buffer."
 
 (defun agent-recall-embark-catalogue (candidate)
   "Catalogue transcript CANDIDATE's session."
-  (when-let* ((file (agent-recall--candidate-file candidate))
-              (session-id (agent-recall--resolve-session-id file)))
-    (let ((agent-recall--transcript-session-id session-id))
-      (agent-recall-catalogue))))
+  (when-let* ((file (agent-recall--candidate-file candidate)))
+    (let ((session-id (agent-recall--resolve-session-id file)))
+      ;; Roughly a third of indexed transcripts predate session ids and can
+      ;; never resolve one.  Silently doing nothing reads as a broken key;
+      ;; `r' and `R' already say so out loud.
+      (unless session-id
+        (user-error "This transcript has no session ID to catalogue"))
+      (let ((agent-recall--transcript-session-id session-id))
+        (agent-recall-catalogue)))))
 
 (defvar agent-recall-transcript-embark-map
   (let ((map (make-sparse-keymap)))
