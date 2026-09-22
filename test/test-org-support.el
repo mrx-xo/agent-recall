@@ -64,6 +64,18 @@
   (with-test-file f "#+TITLE: Some transcript\n"
     (should-not (agent-recall--org-read-property f "Working_Directory"))))
 
+(ert-deftest test-session-title-round-trip-org ()
+  (with-test-file f "#+TITLE: Transcript\n#+PROPERTY: Session abc\n\n** User\nHello\n"
+    (agent-recall--write-session-title-to-file f "Fix completion\nignored")
+    (should (equal (agent-recall--read-session-title f) "Fix completion"))))
+
+(ert-deftest test-session-title-round-trip-markdown ()
+  (with-test-md-file f "# Agent Shell Transcript\n\n**Agent:** Codex\n\n---\n"
+    (agent-recall--write-session-title-to-file f "Fix completion")
+    (should (equal (agent-recall--read-session-title f) "Fix completion"))
+    (agent-recall--write-session-title-to-file f "Updated title")
+    (should (equal (agent-recall--read-session-title f) "Updated title"))))
+
 ;; ---------------------------------------------------------------------------
 ;; agent-recall--transcript-preview (org)
 ;; ---------------------------------------------------------------------------

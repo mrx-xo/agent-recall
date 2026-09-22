@@ -244,7 +244,7 @@ falls back to `grep'."
                       user-emacs-directory))
   "Path to the persistent transcript index file.
 The index stores metadata (file paths, project names, timestamps,
-session IDs, and previews) for all known transcripts.  It is updated
+session IDs, session titles, and previews) for all known transcripts.  It is updated
 automatically when new agent-shell sessions are created (via the
 `agent-recall-track-sessions' hook) and can be rebuilt from scratch
 with `agent-recall-reindex'."
@@ -369,7 +369,7 @@ navigate candidates.  When nil, falls back to plain `completing-read'."
 (defvar agent-recall--index nil
   "In-memory hash-table of indexed transcripts.
 Keys are absolute file paths, values are plists
-\(:project :dir :timestamp :session-id :preview).")
+\(:project :dir :timestamp :session-id :title :preview).")
 
 (defvar agent-recall--index-loaded-p nil
   "Non-nil if the index has been loaded from disk this Emacs session.")
@@ -748,13 +748,15 @@ Extracts a preview from the file content.  Saves the index to disk."
          (project (agent-recall--project-name dir))
          (basename (file-name-sans-extension (file-name-nondirectory file)))
          (preview (when (file-exists-p file)
-                    (agent-recall--transcript-preview file))))
+                    (agent-recall--transcript-preview file)))
+         (title (agent-recall--read-session-title file)))
     (puthash file
              (list :project project
                    :dir (directory-file-name dir)
                    :timestamp basename
                    :session-id session-id
                    :agent (agent-recall--read-agent-name file)
+                   :title title
                    :preview (or preview "(empty)"))
              agent-recall--index)
     (agent-recall--index-save)))
@@ -1066,6 +1068,16 @@ returns `/path/to/project'."
              nil t)
         (string-trim (match-string 1))))))
 
+(defun agent-recall--read-session-title (file)
+  "Return the session title stored in transcript FILE, or nil."
+  (when (and file (file-exists-p file))
+    (if (agent-recall--org-file-p file)
+        (agent-recall--org-read-property file "Session_Title")
+      (with-temp-buffer
+        (insert-file-contents file nil 0 3000)
+        (when (re-search-forward "^\\*\\*Title:\\*\\*\\s-*\\(.+\\)$" nil t)
+          (string-trim (match-string 1)))))))
+
 (defun agent-recall--project-name-from-file (file)
   "Derive a project name from transcript FILE metadata.
 For org files, reads the Working_Directory property.
@@ -1140,13 +1152,15 @@ created outside of agent-shell sessions tracked by the hook."
         (dolist (file files)
           (let* ((basename (file-name-sans-extension (file-name-nondirectory file)))
                  (preview (agent-recall--transcript-preview file))
-                 (session-id (agent-recall--resolve-session-id file)))
+                 (session-id (agent-recall--resolve-session-id file))
+                 (title (agent-recall--read-session-title file)))
             (puthash file
                      (list :project project
                            :dir (directory-file-name dir)
                            :timestamp basename
                            :session-id session-id
                            :agent (agent-recall--read-agent-name file)
+                           :title title
                            :preview (or preview "(empty)"))
                      new-index)
             (cl-incf file-count)))))
@@ -1163,13 +1177,15 @@ created outside of agent-shell sessions tracked by the hook."
                      (basename (file-name-sans-extension
                                 (file-name-nondirectory file)))
                      (preview (agent-recall--transcript-preview file))
-                     (session-id (agent-recall--resolve-session-id file)))
+                     (session-id (agent-recall--resolve-session-id file))
+                     (title (agent-recall--read-session-title file)))
                 (puthash file
                          (list :project project
                                :dir (directory-file-name dir)
                                :timestamp basename
                                :session-id session-id
                                :agent (agent-recall--read-agent-name file)
+                               :title title
                                :preview (or preview "(empty)"))
                          new-index)
                 (cl-incf file-count)))))))
@@ -1547,8 +1563,12 @@ Each entry also carries its timestamp for sorting."
                  (let* ((file (agent-recall--canonical-file file))
                         (project (plist-get entry :project))
                         (ts (plist-get entry :timestamp))
+                        (title (plist-get entry :title))
                         (display (concat (agent-recall--provider-icon file entry)
                                          (format "[%s] " project)
+                                         (if (and title (not (string-empty-p title)))
+                                             (concat title "  ")
+                                           "")
                                          (propertize (agent-recall--display-timestamp ts)
                                                      'face 'shadow)
                                          (agent-recall--label-suffix
@@ -2377,6 +2397,49 @@ Only shows transcripts that have resolvable session IDs."
 ;;; Part A: Forward Session ID Embedding
 ;;; ====================================================================
 
+(defun agent-recall--write-session-title-to-file (filepath title)
+  "Store TITLE in the header of transcript at FILEPATH."
+  (when (and filepath (file-exists-p filepath)
+             (stringp title) (not (string-empty-p title)))
+    (let* ((title (string-trim (car (split-string title "\n"))))
+           (orgp (agent-recall--org-file-p filepath))
+           (line (if orgp
+                     (format "#+PROPERTY: Session_Title %s" title)
+                   (format "**Title:** %s" title)))
+           (regexp (if orgp
+                       "^#\\+PROPERTY:\\s-+Session_Title\\s-+.*$"
+                     "^\\*\\*Title:\\*\\*.*$")))
+      (with-temp-buffer
+        (insert-file-contents filepath)
+        (goto-char (point-min))
+        (if (re-search-forward regexp nil t)
+            (unless (equal (match-string 0) line)
+              (replace-match line t t)
+              (write-region (point-min) (point-max) filepath nil 'no-message))
+          (goto-char (point-min))
+          (if orgp
+              (when (re-search-forward "^#\\+TITLE:.*$" nil t)
+                (end-of-line))
+            (when (re-search-forward "^---$" nil t)
+              (goto-char (match-beginning 0))))
+          (insert (if orgp (concat "\n" line) (concat line "\n\n")))
+          (write-region (point-min) (point-max) filepath nil 'no-message))))))
+
+(defun agent-recall--sync-session-metadata (shell-buffer)
+  "Write SHELL-BUFFER's session metadata and refresh its index entry."
+  (when (buffer-live-p shell-buffer)
+    (with-current-buffer shell-buffer
+      (when (and agent-shell--transcript-file
+                 (file-exists-p agent-shell--transcript-file))
+        (let ((session-id (map-nested-elt agent-shell--state '(:session :id)))
+              (title (map-nested-elt agent-shell--state '(:session :title))))
+          (when session-id
+            (agent-recall--write-session-id-to-file
+             agent-shell--transcript-file session-id))
+          (agent-recall--write-session-title-to-file
+           agent-shell--transcript-file title)
+          (agent-recall--index-add agent-shell--transcript-file session-id))))))
+
 (defun agent-recall--write-session-id-to-file (filepath session-id)
   "Insert SESSION-ID into the header of transcript at FILEPATH.
 For markdown files, inserts `**Session:** UUID' before the `---' separator.
@@ -2439,6 +2502,11 @@ Add to your config:
          (with-current-buffer shell-buffer
            (agent-recall--session-metadata-capture)))))
     (add-hook 'kill-buffer-hook #'agent-recall--session-metadata-capture nil t)
+    (agent-shell-subscribe-to
+     :shell-buffer shell-buffer
+     :event 'session-title-changed
+     :on-event (lambda (_event)
+                 (agent-recall--sync-session-metadata shell-buffer)))
     ;; Subscribe to init-session to capture the session ID
     (agent-shell-subscribe-to
      :shell-buffer shell-buffer
@@ -2470,6 +2538,10 @@ Add to your config:
                           (agent-recall--write-session-id-to-file
                            agent-shell--transcript-file
                            agent-recall--pending-session-id)
+                          (agent-recall--write-session-title-to-file
+                           agent-shell--transcript-file
+                           (map-nested-elt agent-shell--state
+                                           '(:session :title)))
                           (agent-recall--index-add
                            agent-shell--transcript-file
                            agent-recall--pending-session-id)
