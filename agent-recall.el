@@ -148,6 +148,11 @@
   "Fallback face for the Gemini provider indicator on text terminals."
   :group 'agent-recall)
 
+(defface agent-recall-provider-opencode
+  '((t :inherit default :weight bold))
+  "Fallback face for the OpenCode provider indicator on text terminals."
+  :group 'agent-recall)
+
 (defcustom agent-recall-search-paths nil
   "Root directories to scan when rebuilding the transcript index.
 Used only by `agent-recall-reindex'.  Each directory is recursively
@@ -1050,12 +1055,15 @@ can concat it unconditionally onto candidate strings."
     ""))
 
 (defun agent-recall--provider-for-name (name)
-  "Return a provider symbol (`anthropic', `openai', `gemini') for NAME.
+  "Return a provider symbol (`anthropic', `openai', `gemini', `opencode') for NAME.
 NAME is an agent name or model id string.  Returns nil when it matches
 no known provider."
   (when (and name (stringp name))
     (let ((n (downcase name)))
       (cond
+       ;; First: OpenCode runs other vendors' models, so its agent name
+       ;; must win over whatever model id rides along with it.
+       ((string-match-p "opencode" n) 'opencode)
        ((string-match-p "claude\\|anthropic" n) 'anthropic)
        ((string-match-p "codex\\|openai\\|chatgpt\\|gpt\\|\\bo[0-9]" n) 'openai)
        ((string-match-p "gemini\\|bard\\|palm\\|google" n) 'gemini)))))
