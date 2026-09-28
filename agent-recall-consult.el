@@ -30,6 +30,7 @@
 ;;; Code:
 
 (require 'agent-recall)
+(eval-when-compile (require 'agent-recall))
 (require 'cl-lib)
 (require 'consult nil t)
 

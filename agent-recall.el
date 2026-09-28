@@ -737,7 +737,8 @@ Writes to a temporary file then renames to `agent-recall-index-file'."
               (print-length nil))
           (prin1 agent-recall--index (current-buffer)))
         (insert "\n"))
-      (rename-file temp file t)))))
+      (rename-file temp file t)
+      (agent-recall--ensure-symlink-dir)))))
 
 (defun agent-recall--index-add (file &optional session-id)
   "Add transcript FILE to the index with optional SESSION-ID.
