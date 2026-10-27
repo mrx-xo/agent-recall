@@ -6,19 +6,11 @@
 ;; initialized the buffer.  Enabling the mode must not depend on evil's
 ;; buffer-local state, and the normal-state keys must still resolve once
 ;; evil is active.
-;; Needs evil and agent-shell loadable, so run against a full config:
-;;   emacs --batch -l ~/.emacs.d/init.el \
-;;     -l test/test-transcript-mode-evil.el -f ert-run-tests-batch-and-exit
+;; Requires Evil and agent-shell on the load path, but no personal init file.
 
 ;;; Code:
 
 (require 'ert)
-
-;; Batch runs from a full init: flush Elpaca's queues so evil and
-;; agent-shell are actually on the load path before requiring them.
-(when noninteractive
-  (when (fboundp 'elpaca-process-queues) (elpaca-process-queues))
-  (when (fboundp 'elpaca-wait) (elpaca-wait)))
 
 (require 'evil)
 (require 'agent-recall)
@@ -41,10 +33,23 @@
 (defmacro with-global-transcript-mode (&rest body)
   "Run BODY with `global-agent-recall-transcript-mode' on, restoring it after."
   (declare (indent 0))
-  `(let ((was-on (bound-and-true-p global-agent-recall-transcript-mode)))
+  `(let ((was-on (bound-and-true-p global-agent-recall-transcript-mode))
+         (evil-was-on (bound-and-true-p evil-mode))
+         (auto-mode-alist (cons '("\\.md\\'" . text-mode) auto-mode-alist)))
+     (evil-mode 1)
      (global-agent-recall-transcript-mode 1)
      (unwind-protect (progn ,@body)
-       (unless was-on (global-agent-recall-transcript-mode -1)))))
+       (unless was-on (global-agent-recall-transcript-mode -1))
+       (unless evil-was-on (evil-mode -1)))))
+
+(ert-deftest test-transcript-mode-activates-keys-with-late-evil ()
+  "Bindings must work immediately when Evil is enabled after Agent Recall."
+  (with-transcript-test-file
+    (with-current-buffer (find-file-noselect file)
+      (agent-recall-transcript-mode 1)
+      (evil-local-mode 1)
+      (should (eq (key-binding (kbd "r")) #'agent-recall-resume-current))
+      (should (eq (key-binding (kbd "q")) #'agent-recall-quit-transcript)))))
 
 (ert-deftest test-transcript-mode-global-enable-does-not-break-evil ()
   "Visiting a transcript with the globalized mode on must leave evil initialized.
@@ -52,7 +57,6 @@ The globalized mode runs from `after-change-major-mode-hook' ahead of
 evil's own enable-in-buffer hook; transcript-mode must not touch evil's
 buffer-local maps there, or the error aborts the hook chain and the
 buffer is left without evil and in `fundamental-mode'."
-  (should (bound-and-true-p evil-mode))
   (with-global-transcript-mode
     (with-transcript-test-file
       (with-current-buffer (find-file-noselect file)

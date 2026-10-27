@@ -85,6 +85,7 @@
 (defvar deadgrep-extra-arguments)
 (defvar counsel-rg-base-command)
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
+(declare-function evil-normalize-keymaps "evil-core" (&optional keymaps))
 (declare-function deadgrep "deadgrep" (search-term &optional directory))
 (declare-function counsel-rg "counsel" (&optional initial-input initial-directory extra-rg-args rg-prompt))
 (defvar consult-ripgrep-args)
@@ -249,8 +250,8 @@ falls back to `grep'."
                       user-emacs-directory))
   "Path to the persistent transcript index file.
 The index stores metadata (file paths, project names, timestamps,
-session IDs, session titles, and previews) for all known transcripts.  It is updated
-automatically when new agent-shell sessions are created (via the
+session IDs, session titles, and previews) for all known transcripts.
+It is updated automatically when new agent-shell sessions are created (via the
 `agent-recall-track-sessions' hook) and can be rebuilt from scratch
 with `agent-recall-reindex'."
   :type 'file
@@ -1076,15 +1077,45 @@ returns `/path/to/project'."
              nil t)
         (string-trim (match-string 1))))))
 
+(defun agent-recall--transcript-header-end (orgp)
+  "Return the end of the current transcript header.
+ORGP selects Org headings; otherwise use Markdown separators or headings."
+  (save-excursion
+    (goto-char (point-min))
+    (if (re-search-forward (if orgp "^\\*+ " "^\\(?:---[ \t]*$\\|##[ \t]+\\)") nil t)
+        (match-beginning 0)
+      (point-max))))
+
+(defun agent-recall--insert-transcript-header (file)
+  "Replace the current buffer with the complete header of transcript FILE.
+Read in growing chunks so long metadata is not truncated and ordinary
+transcripts do not require reading the conversation body."
+  (let ((size (file-attribute-size (file-attributes (file-truename file))))
+        (limit 3000)
+        (orgp (agent-recall--org-file-p file))
+        end)
+    (while (progn
+             (erase-buffer)
+             (insert-file-contents file nil 0 limit)
+             (setq end (agent-recall--transcript-header-end orgp))
+             (and (= end (point-max)) (< limit size)))
+      (setq limit (* 2 limit)))
+    (delete-region end (point-max))
+    (goto-char (point-min))))
+
 (defun agent-recall--read-session-title (file)
   "Return the session title stored in transcript FILE, or nil."
   (when (and file (file-exists-p file))
-    (if (agent-recall--org-file-p file)
-        (agent-recall--org-read-property file "Session_Title")
-      (with-temp-buffer
-        (insert-file-contents file nil 0 3000)
-        (when (re-search-forward "^\\*\\*Title:\\*\\*\\s-*\\(.+\\)$" nil t)
-          (string-trim (match-string 1)))))))
+    (with-temp-buffer
+      (agent-recall--insert-transcript-header file)
+      (let* ((orgp (agent-recall--org-file-p file))
+             (end (agent-recall--transcript-header-end orgp))
+             (regexp (if orgp
+                         "^#\\+PROPERTY:[ \t]+Session_Title[ \t]+\\(.*\\)$"
+                       "^\\*\\*Title:\\*\\*[ \t]*\\(.*\\)$")))
+        (when (re-search-forward regexp end t)
+          (let ((title (string-trim (match-string 1))))
+            (unless (string-empty-p title) title)))))))
 
 (defun agent-recall--project-name-from-file (file)
   "Derive a project name from transcript FILE metadata.
@@ -1245,14 +1276,16 @@ backslash in the argv (e.g. \"\\\\*.md\"), and ripgrep would match nothing."
 ;;;; Search
 
 (defun agent-recall--ensure-symlink-dir ()
-  "Create a directory with symlinks to all transcript dirs.
+  "Refresh a directory with symlinks to all transcript dirs.
 Returns the path.  Each symlink is named PROJECT-COUNT to avoid
 collisions when multiple projects share a name.
-The directory lives alongside `agent-recall-index-file'."
+The directory lives alongside `agent-recall-index-file'.
+Keep the directory and regular files intact; replace only stale symlinks."
   (let* ((base (expand-file-name "search" (file-name-directory agent-recall-index-file)))
-         (dirs (agent-recall--index-dirs)))
-    (when (file-exists-p base)
-      (delete-directory base t))
+         (dirs (agent-recall--index-dirs))
+         (wanted (make-hash-table :test 'equal)))
+    (when (file-symlink-p base)
+      (error "Search directory must not be a symbolic link: %s" base))
     (make-directory base t)
     (let ((seen (make-hash-table :test 'equal)))
       (dolist (dir dirs)
@@ -1263,10 +1296,26 @@ The directory lives alongside `agent-recall-index-file'."
                (count (gethash project seen 0))
                (link-name (if (= count 0) project
                             (format "%s-%d" project count))))
+          (while (gethash (expand-file-name link-name base) wanted)
+            (setq count (1+ count)
+                  link-name (format "%s-%d" project count)))
           (puthash project (1+ count) seen)
-          (condition-case nil
-              (make-symbolic-link dir (expand-file-name link-name base) t)
-            (error nil)))))
+          (puthash (expand-file-name link-name base) dir wanted))))
+    (dolist (file (directory-files base t directory-files-no-dot-files-regexp))
+      (when-let ((target (file-symlink-p file)))
+        (unless (equal (directory-file-name (expand-file-name target base))
+                       (when-let ((dir (gethash file wanted)))
+                         (directory-file-name (expand-file-name dir))))
+          (delete-file file))))
+    (maphash
+     (lambda (link dir)
+       (unless (file-symlink-p link)
+         (condition-case err
+             (make-symbolic-link dir link)
+           (file-error
+            (message "agent-recall: cannot create search link %s: %s"
+                     link (error-message-string err))))))
+     wanted)
     (setq agent-recall--symlink-dir base)
     base))
 
@@ -1965,19 +2014,29 @@ plain markdown buffer you can render with your preferred method."
 ;; hook, so evil's buffer-local maps do not exist yet and the error
 ;; aborts the hook chain (leaving the buffer without evil, in
 ;; `fundamental-mode').  Binding on the mode map is order-independent.
-(with-eval-after-load 'evil
-  (evil-define-key* 'normal agent-recall-transcript-mode-map
-    (kbd "r") #'agent-recall-resume-current
-    (kbd "R") #'agent-recall-force-resume-current
-    (kbd "c") #'agent-recall-clean-view
-    (kbd "C-j") #'agent-recall-next-user-message
-    (kbd "C-k") #'agent-recall-prev-user-message
-    (kbd "]]") #'agent-recall-next-user-message
-    (kbd "[[") #'agent-recall-prev-user-message
-    (kbd "gj") #'agent-recall-next-user-message
-    (kbd "gk") #'agent-recall-prev-user-message
-    (kbd "b") #'agent-recall-browse-from-transcript
-    (kbd "q") #'agent-recall-quit-transcript))
+(defun agent-recall--setup-evil-bindings ()
+  "Install transcript keys once Evil is available."
+  (when (fboundp 'evil-define-key*)
+    (evil-define-key* 'normal agent-recall-transcript-mode-map
+      (kbd "r") #'agent-recall-resume-current
+      (kbd "R") #'agent-recall-force-resume-current
+      (kbd "c") #'agent-recall-clean-view
+      (kbd "C-j") #'agent-recall-next-user-message
+      (kbd "C-k") #'agent-recall-prev-user-message
+      (kbd "]]") #'agent-recall-next-user-message
+      (kbd "[[") #'agent-recall-prev-user-message
+      (kbd "gj") #'agent-recall-next-user-message
+      (kbd "gk") #'agent-recall-prev-user-message
+      (kbd "b") #'agent-recall-browse-from-transcript
+      (kbd "q") #'agent-recall-quit-transcript)
+    (when (bound-and-true-p evil-local-mode)
+      (evil-normalize-keymaps))
+    (remove-hook 'evil-mode-hook #'agent-recall--setup-evil-bindings)
+    (remove-hook 'evil-local-mode-hook #'agent-recall--setup-evil-bindings)))
+
+(add-hook 'evil-mode-hook #'agent-recall--setup-evil-bindings)
+(add-hook 'evil-local-mode-hook #'agent-recall--setup-evil-bindings)
+(agent-recall--setup-evil-bindings)
 
 (defun agent-recall--header-entry (key label)
   "Format a header line entry with KEY highlighted and LABEL dimmed."
@@ -2407,30 +2466,27 @@ Only shows transcripts that have resolvable session IDs."
 
 (defun agent-recall--write-session-title-to-file (filepath title)
   "Store TITLE in the header of transcript at FILEPATH."
+  (when (stringp title)
+    (setq title (string-trim (substring title 0 (string-match "[\r\n]" title)))))
   (when (and filepath (file-exists-p filepath)
              (stringp title) (not (string-empty-p title)))
-    (let* ((title (string-trim (car (split-string title "\n"))))
-           (orgp (agent-recall--org-file-p filepath))
+    (let* ((orgp (agent-recall--org-file-p filepath))
            (line (if orgp
                      (format "#+PROPERTY: Session_Title %s" title)
                    (format "**Title:** %s" title)))
            (regexp (if orgp
-                       "^#\\+PROPERTY:\\s-+Session_Title\\s-+.*$"
+                       "^#\\+PROPERTY:[ \t]+Session_Title[ \t]+.*$"
                      "^\\*\\*Title:\\*\\*.*$")))
       (with-temp-buffer
         (insert-file-contents filepath)
         (goto-char (point-min))
-        (if (re-search-forward regexp nil t)
+        (if (re-search-forward regexp (agent-recall--transcript-header-end orgp) t)
             (unless (equal (match-string 0) line)
               (replace-match line t t)
               (write-region (point-min) (point-max) filepath nil 'no-message))
-          (goto-char (point-min))
-          (if orgp
-              (when (re-search-forward "^#\\+TITLE:.*$" nil t)
-                (end-of-line))
-            (when (re-search-forward "^---$" nil t)
-              (goto-char (match-beginning 0))))
-          (insert (if orgp (concat "\n" line) (concat line "\n\n")))
+          (goto-char (agent-recall--transcript-header-end orgp))
+          (unless (bolp) (insert "\n"))
+          (insert line "\n\n")
           (write-region (point-min) (point-max) filepath nil 'no-message))))))
 
 (defun agent-recall--sync-session-metadata (shell-buffer)
@@ -2581,15 +2637,15 @@ ID is a UUID (Claude Code, Codex) or an OpenCode session id
             "\\|"
             "ses_[A-Za-z0-9]+")))
       (with-temp-buffer
-        (insert-file-contents file nil 0 1500)
-        (goto-char (point-min))
+        (agent-recall--insert-transcript-header file)
         (when (re-search-forward
                (if (agent-recall--org-file-p file)
-                   (format "^#\\+PROPERTY:\\s-+Session\\(?:_ID\\)?\\s-+\\(%s\\)"
+                   (format "^#\\+PROPERTY:[ \t]+Session\\(?:_ID\\)?[ \t]+\\(%s\\)[ \t\r]*$"
                            id-re)
-                 (format "^\\*\\*Session\\(?: ID\\)?:\\*\\*\\s-+\\(%s\\)"
+                 (format "^\\*\\*Session\\(?: ID\\)?:\\*\\*[ \t]+\\(%s\\)[ \t\r]*$"
                          id-re))
-               nil t)
+               (agent-recall--transcript-header-end
+                (agent-recall--org-file-p file)) t)
           (match-string 1))))))
 
 (defun agent-recall--parse-transcript-timestamp (file)
