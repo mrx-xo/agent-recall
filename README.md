@@ -434,7 +434,8 @@ The main index is persisted to disk and loads automatically. Retroactive matchin
 
 ### Search directory
 
-For search backends that need a single root directory (deadgrep, counsel-rg, consult-ripgrep), agent-recall creates a temporary symlink directory alongside the index file pointing to all indexed transcript directories.
+For search backends that need a single root directory (deadgrep, counsel-rg, and the built-in Consult ripgrep backend), agent-recall creates a symlink directory alongside the index file pointing to all indexed transcript directories. `agent-recall-consult-search` passes the indexed directories directly to ripgrep.
+The directory is refreshed whenever the index is saved, including when a tracked session adds a transcript or `agent-recall-reindex` runs. Projects whose transcripts are created outside tracked agent-shell sessions still need a reindex before they appear.
 
 ## Claude Code Skill
 
