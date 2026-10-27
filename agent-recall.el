@@ -388,7 +388,9 @@ Keys are absolute file paths, values are plists
 
 (cl-defstruct
     (agent-recall--navigation-session
-     (:constructor agent-recall--navigation-session-create))
+     (:constructor agent-recall--navigation-session-create)
+     ;; Emacs 29 generates overlong compiler-macro docs for these accessors.
+     (:noinline t))
   "Origin information for a transcript navigation session."
   id kind backend minibuffer origin-window selected-file selected-line
   transcript-buffer origin-buffer origin-marker valid-function
