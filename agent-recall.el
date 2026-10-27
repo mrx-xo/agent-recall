@@ -141,6 +141,11 @@
   "Fallback face for the Gemini provider indicator on text terminals."
   :group 'agent-recall)
 
+(defface agent-recall-provider-opencode
+  '((t :foreground "#4B4646" :weight bold))
+  "Fallback face for the OpenCode provider indicator on text terminals."
+  :group 'agent-recall)
+
 (defcustom agent-recall-search-paths nil
   "Root directories to scan when rebuilding the transcript index.
 Used only by `agent-recall-reindex'.  Each directory is recursively
@@ -915,15 +920,17 @@ can concat it unconditionally onto candidate strings."
     ""))
 
 (defun agent-recall--provider-for-name (name)
-  "Return a provider symbol (`anthropic', `openai', `gemini') for NAME.
+  "Return a provider symbol for NAME.
 NAME is an agent name or model id string.  Returns nil when it matches
-no known provider."
+no known provider.  Providers: `anthropic', `openai', `gemini',
+`opencode'."
   (when (and name (stringp name))
     (let ((n (downcase name)))
       (cond
        ((string-match-p "claude\\|anthropic" n) 'anthropic)
        ((string-match-p "codex\\|openai\\|chatgpt\\|gpt\\|\\bo[0-9]" n) 'openai)
-       ((string-match-p "gemini\\|bard\\|palm\\|google" n) 'gemini)))))
+       ((string-match-p "gemini\\|bard\\|palm\\|google" n) 'gemini)
+       ((string-match-p "opencode" n) 'opencode)))))
 
 (defun agent-recall--entry-provider (file entry)
   "Return the provider symbol for transcript FILE with index ENTRY, or nil.
@@ -2488,19 +2495,28 @@ Add to your config:
 (defun agent-recall--read-embedded-session-id (file)
   "Read the session ID from transcript FILE header, if present.
 Supports markdown `**Session:** UUID' (agent-recall) and
-`**Session ID:** UUID' (agent-shell native header), plus org
-`#+PROPERTY: Session UUID' / `#+PROPERTY: Session_ID UUID'."
+`**Session ID:** ID' (agent-shell native header), plus org
+`#+PROPERTY: Session ID' / `#+PROPERTY: Session_ID ID'.
+
+ID is a UUID (Claude Code, Codex) or an OpenCode session id
+\(`ses_…')."
   (when (file-exists-p file)
-    (let ((uuid-re "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}"))
+    (let ((id-re
+           (concat
+            ;; UUID v4: Claude Code, Codex
+            "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}"
+            ;; OpenCode: ses_<base62/ulid-style token>
+            "\\|"
+            "ses_[A-Za-z0-9]+")))
       (with-temp-buffer
         (insert-file-contents file nil 0 1500)
         (goto-char (point-min))
         (when (re-search-forward
                (if (agent-recall--org-file-p file)
                    (format "^#\\+PROPERTY:\\s-+Session\\(?:_ID\\)?\\s-+\\(%s\\)"
-                           uuid-re)
+                           id-re)
                  (format "^\\*\\*Session\\(?: ID\\)?:\\*\\*\\s-+\\(%s\\)"
-                         uuid-re))
+                         id-re))
                nil t)
           (match-string 1))))))
 

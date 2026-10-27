@@ -195,6 +195,29 @@ Hi
 " test-uuid)
     (should (equal (agent-recall--read-embedded-session-id f) test-uuid))))
 
+(ert-deftest test-read-session-id-md-opencode ()
+  "OpenCode `ses_…' session IDs in `**Session ID:**' are readable."
+  (with-test-md-file f "# Agent Shell Transcript
+
+**Agent:** OpenCode
+**Started:** 2026-10-25 23:06:49
+**Working Directory:** /tmp
+**Session ID:** ses_e8ae5ef68ffeq26PjQxeUSZqwS
+
+---
+
+## User
+Hi
+"
+    (should (equal (agent-recall--read-embedded-session-id f)
+                   "ses_e8ae5ef68ffeq26PjQxeUSZqwS"))))
+
+(ert-deftest test-read-session-id-org-opencode ()
+  "OpenCode `ses_…' session IDs in org properties are readable."
+  (with-test-file f "#+TITLE: Test\n#+PROPERTY: Session ses_e8ae5ef68ffeq26PjQxeUSZqwS\n\n** User\nHi\n"
+    (should (equal (agent-recall--read-embedded-session-id f)
+                   "ses_e8ae5ef68ffeq26PjQxeUSZqwS"))))
+
 (ert-deftest test-write-session-id-md-skips-when-agent-shell-header-present ()
   "Do not add a duplicate `**Session:**' when `**Session ID:**' exists."
   (with-test-md-file f (format "# Transcript\n**Session ID:** %s\n\n---\n\n## User\nHi\n" test-uuid)

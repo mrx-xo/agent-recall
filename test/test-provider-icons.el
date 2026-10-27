@@ -35,6 +35,11 @@
   (should (eq 'gemini (agent-recall--provider-for-name "Gemini")))
   (should (eq 'gemini (agent-recall--provider-for-name "gemini-2.5-pro"))))
 
+(ert-deftest test-provider-for-name-opencode ()
+  "OpenCode names map to `opencode'."
+  (should (eq 'opencode (agent-recall--provider-for-name "OpenCode")))
+  (should (eq 'opencode (agent-recall--provider-for-name "opencode-go"))))
+
 (ert-deftest test-provider-for-name-unknown-and-nil ()
   "Unknown names and non-strings return nil."
   (should-not (agent-recall--provider-for-name "some-local-llm"))
