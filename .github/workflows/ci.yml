@@ -10,6 +10,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         emacs-version: ['29.1', '29.4', '30.1']
     steps:
@@ -28,7 +29,11 @@ jobs:
             (package-initialize)
             (package-refresh-contents)
             (package-install 'package-lint)
-            (package-install 'agent-shell))"
+            (dolist (dependency '(agent-shell consult vertico evil))
+              (package-install dependency)))"
+
+      - name: Run ERT from source
+        run: emacs -Q --batch -l test/run-tests.el
 
       - name: Run package-lint
         run: |
@@ -62,12 +67,13 @@ jobs:
 
       - name: Byte compile
         run: |
-          emacs --batch --eval "
+          emacs --batch -L . --eval "
           (progn
             (require 'package)
             (add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)
             (package-initialize)
-            (package-refresh-contents)
-            (package-install 'agent-shell)
             (setq byte-compile-error-on-warn t)
-            (batch-byte-compile))" agent-recall.el
+            (batch-byte-compile))" agent-recall.el agent-recall-consult.el
+
+      - name: Run ERT from bytecode
+        run: emacs -Q --batch -l test/run-tests.el

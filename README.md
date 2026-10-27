@@ -154,6 +154,12 @@ To automatically embed session IDs in new transcripts (enabling instant resume):
 (add-hook 'agent-shell-mode-hook #'agent-recall-track-sessions)
 ```
 
+Tracking also captures session titles when agent-shell emits a title change.
+Titles appear in Browse and are stored in the transcript header (`**Title:**`
+in Markdown or `Session_Title` in Org), so they are searchable. Reindexing
+preserves titles already present in those headers. Agents that do not provide
+a title keep the usual project and timestamp display.
+
 #### Browse sort order
 
 ```elisp
@@ -270,6 +276,10 @@ There are two ways to resume a past session:
 If the session is already running in an agent-shell buffer, `r` will switch to that buffer instead of starting a new one. Press `R` to force a fresh resume regardless.
 
 Requires agent-shell to be loaded.
+
+UUID session IDs and OpenCode's `ses_` session IDs are supported in both
+Markdown and Org transcript headers. Run `M-x agent-recall-reindex` to make
+existing OpenCode transcripts resumable after updating.
 
 #### Transcript continuity
 
@@ -434,7 +444,9 @@ The main index is persisted to disk and loads automatically. Retroactive matchin
 
 ### Search directory
 
-For search backends that need a single root directory (deadgrep, counsel-rg, consult-ripgrep), agent-recall creates a temporary symlink directory alongside the index file pointing to all indexed transcript directories.
+For search backends that need a single root directory (deadgrep, counsel-rg, and the built-in Consult ripgrep backend), agent-recall creates a symlink directory alongside the index file pointing to all indexed transcript directories. `agent-recall-consult-search` passes the indexed directories directly to ripgrep.
+The directory is refreshed whenever the index is saved, including when a tracked session adds a transcript or `agent-recall-reindex` runs. Projects whose transcripts are created outside tracked agent-shell sessions still need a reindex before they appear.
+Refreshes update symlinks in place and preserve regular files in the directory.
 
 ## Claude Code Skill
 
@@ -475,3 +487,17 @@ These functions are designed for use from `emacsclient --eval`:
 ## Contributing
 
 Issues and pull requests welcome at https://github.com/Marx-A00/agent-recall.
+
+With agent-shell, Consult, Vertico, and Evil installed through `package.el`,
+run the automated tests from the repository root:
+
+```bash
+emacs -Q --batch -l test/run-tests.el
+```
+
+For other package managers, add those dependencies to `load-path` before loading
+the runner. The runner uses source files unless byte-compiled files are present.
+CI runs the suite both ways on Emacs 29.1, 29.4, and 30.1, alongside package-lint,
+checkdoc, and strict compilation of both Lisp modules. The three real-minibuffer
+tests in `test/test-picker-integration.el` require interactive Emacs and are
+skipped in batch mode.

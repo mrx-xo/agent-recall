@@ -64,6 +64,18 @@
   (with-test-file f "#+TITLE: Some transcript\n"
     (should-not (agent-recall--org-read-property f "Working_Directory"))))
 
+(ert-deftest test-session-title-round-trip-org ()
+  (with-test-file f "#+TITLE: Transcript\n#+PROPERTY: Session abc\n\n** User\nHello\n"
+    (agent-recall--write-session-title-to-file f "Fix completion\nignored")
+    (should (equal (agent-recall--read-session-title f) "Fix completion"))))
+
+(ert-deftest test-session-title-round-trip-markdown ()
+  (with-test-md-file f "# Agent Shell Transcript\n\n**Agent:** Codex\n\n---\n"
+    (agent-recall--write-session-title-to-file f "Fix completion")
+    (should (equal (agent-recall--read-session-title f) "Fix completion"))
+    (agent-recall--write-session-title-to-file f "Updated title")
+    (should (equal (agent-recall--read-session-title f) "Updated title"))))
+
 ;; ---------------------------------------------------------------------------
 ;; agent-recall--transcript-preview (org)
 ;; ---------------------------------------------------------------------------
@@ -194,6 +206,29 @@
 Hi
 " test-uuid)
     (should (equal (agent-recall--read-embedded-session-id f) test-uuid))))
+
+(ert-deftest test-read-session-id-md-opencode ()
+  "OpenCode `ses_…' session IDs in `**Session ID:**' are readable."
+  (with-test-md-file f "# Agent Shell Transcript
+
+**Agent:** OpenCode
+**Started:** 2026-10-25 23:06:49
+**Working Directory:** /tmp
+**Session ID:** ses_e8ae5ef68ffeq26PjQxeUSZqwS
+
+---
+
+## User
+Hi
+"
+    (should (equal (agent-recall--read-embedded-session-id f)
+                   "ses_e8ae5ef68ffeq26PjQxeUSZqwS"))))
+
+(ert-deftest test-read-session-id-org-opencode ()
+  "OpenCode `ses_…' session IDs in org properties are readable."
+  (with-test-file f "#+TITLE: Test\n#+PROPERTY: Session ses_e8ae5ef68ffeq26PjQxeUSZqwS\n\n** User\nHi\n"
+    (should (equal (agent-recall--read-embedded-session-id f)
+                   "ses_e8ae5ef68ffeq26PjQxeUSZqwS"))))
 
 (ert-deftest test-write-session-id-md-skips-when-agent-shell-header-present ()
   "Do not add a duplicate `**Session:**' when `**Session ID:**' exists."
