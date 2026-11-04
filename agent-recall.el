@@ -1262,7 +1262,7 @@ searched separately via `agent-recall-search-summaries'."
   (concat (mapconcat (lambda (pat)
                        (format "--include=%s" (shell-quote-argument pat)))
                      (agent-recall--file-patterns) " ")
-          " --exclude=*.summary.*"))
+          " --exclude=" (shell-quote-argument "*.summary.*")))
 
 (defun agent-recall--file-patterns-as-globs ()
   "Return `agent-recall-file-patterns' as ripgrep --glob arguments.
