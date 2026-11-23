@@ -1218,14 +1218,78 @@ returns `/path/to/project'."
              nil t)
         (string-trim (match-string 1))))))
 
-(defun agent-recall--transcript-header-end (orgp)
-  "Return the end of the current transcript header.
-ORGP selects Org headings; otherwise use Markdown separators or headings."
+(defun agent-recall--frontmatter-value (raw)
+  "Decode RAW YAML frontmatter scalar, or return nil if empty/null."
+  (let ((value (string-trim raw)))
+    (cond
+     ((member value '("" "~" "null")) nil)
+     ((string-prefix-p "\"" value)
+      (condition-case nil
+          (json-read-from-string value)
+        (error (string-trim value "\"" "\""))))
+     (t value))))
+
+(defun agent-recall--frontmatter ()
+  "Locate the YAML frontmatter block in the current buffer.
+Skips any leading `**Field:**' or blank lines.
+Return (OPEN FIELDS-BEG FIELDS-END CLOSE), `incomplete' if
+unterminated, or nil if absent."
   (save-excursion
     (goto-char (point-min))
-    (if (re-search-forward (if orgp "^\\*+ " "^\\(?:---[ \t]*$\\|##[ \t]+\\)") nil t)
-        (match-beginning 0)
-      (point-max))))
+    (while (and (not (eobp))
+                (looking-at "\\(?:\\*\\*[^*\n]+:\\*\\*.*\\)?[ \t]*$"))
+      (forward-line 1))
+    (when (looking-at "---[ \t]*\n\\([A-Za-z_][A-Za-z0-9_]*:\\)")
+      (let ((open (point))
+            (fields-beg (match-beginning 1)))
+        (goto-char fields-beg)
+        (if (re-search-forward "^---[ \t]*$" nil t)
+            (list open fields-beg (match-beginning 0) (match-end 0))
+          'incomplete)))))
+
+(defun agent-recall--markdown-header-field (file label key)
+  "Read `**LABEL:**' or YAML frontmatter KEY from markdown transcript FILE."
+  (when (and file (file-exists-p file))
+    (with-temp-buffer
+      (agent-recall--insert-transcript-header file)
+      (if (re-search-forward
+           (format "^\\*\\*%s:\\*\\*[ \t]+\\(.+\\)$" (regexp-quote label))
+           nil t)
+          (string-trim (match-string 1))
+        (let ((frontmatter (agent-recall--frontmatter)))
+          (when (consp frontmatter)
+            (goto-char (nth 1 frontmatter))
+            (when (re-search-forward
+                   (format "^%s:[ \t]*\\(.*\\)$" (regexp-quote key))
+                   (nth 2 frontmatter) t)
+              (agent-recall--frontmatter-value (match-string 1)))))))))
+
+(defun agent-recall--hoist-frontmatter ()
+  "Move any header lines above YAML frontmatter below it.
+Return non-nil if the buffer changed."
+  (let ((frontmatter (agent-recall--frontmatter)))
+    (when (and (consp frontmatter) (> (car frontmatter) (point-min)))
+      (let ((prefix (string-trim
+                     (buffer-substring (point-min) (car frontmatter)))))
+        (delete-region (point-min) (car frontmatter))
+        (goto-char (agent-recall--transcript-header-end nil))
+        (unless (bolp) (insert "\n"))
+        (unless (string-empty-p prefix)
+          (insert prefix "\n\n"))
+        t))))
+
+(defun agent-recall--transcript-header-end (orgp)
+  "Return the end of the current transcript header.
+ORGP selects Org headings; otherwise scan past any YAML frontmatter to
+the first `---' separator or `##' heading."
+  (save-excursion
+    (let ((frontmatter (and (not orgp) (agent-recall--frontmatter))))
+      (if (eq frontmatter 'incomplete)
+          (point-max)
+        (goto-char (if frontmatter (nth 3 frontmatter) (point-min)))
+        (if (re-search-forward (if orgp "^\\*+ " "^\\(?:---[ \t]*$\\|##[ \t]+\\)") nil t)
+            (match-beginning 0)
+          (point-max))))))
 
 (defun agent-recall--insert-transcript-header (file)
   "Replace the current buffer with the complete header of transcript FILE.
@@ -2637,27 +2701,19 @@ Window placement for the non-viewport path is controlled by
   "Extract the Working Directory from transcript FILE header.
 Supports both markdown and `org-mode' transcript formats."
   (when (file-exists-p file)
-    (with-temp-buffer
-      (insert-file-contents file nil 0 500)
-      (goto-char (point-min))
-      (let ((regex (if (agent-recall--org-file-p file)
-                       "^#\\+PROPERTY:\\s-+Working_Directory\\s-+\\(.+\\)"
-                     "^\\*\\*Working Directory:\\*\\* \\(.+\\)")))
-        (when (re-search-forward regex nil t)
-          (let ((dir (string-trim (match-string 1))))
-            (when (file-directory-p dir)
-              dir)))))))
+    (let ((dir (if (agent-recall--org-file-p file)
+                   (agent-recall--org-read-property file "Working_Directory")
+                 (agent-recall--markdown-header-field
+                  file "Working Directory" "working_directory"))))
+      (when (and dir (file-directory-p dir))
+        dir))))
 
 (defun agent-recall--read-agent-name (file)
   "Extract the Agent from transcript FILE header."
   (when (file-exists-p file)
     (if (agent-recall--org-file-p file)
         (agent-recall--org-read-property file "Agent")
-      (with-temp-buffer
-        (insert-file-contents file nil 0 500)
-        (goto-char (point-min))
-        (when (re-search-forward "^\\*\\*Agent:\\*\\* \\(.+\\)" nil t)
-          (string-trim (match-string 1)))))))
+      (agent-recall--markdown-header-field file "Agent" "agent"))))
 
 (defun agent-recall--normalize-agent-name (name)
   "Normalize agent NAME for matching transcript headers to configs."
@@ -2935,15 +2991,16 @@ Only shows transcripts that have resolvable session IDs."
                      "^\\*\\*Title:\\*\\*.*$")))
       (with-temp-buffer
         (insert-file-contents filepath)
-        (goto-char (point-min))
-        (if (re-search-forward regexp (agent-recall--transcript-header-end orgp) t)
-            (unless (equal (match-string 0) line)
-              (replace-match line t t)
-              (write-region (point-min) (point-max) filepath nil 'no-message))
-          (goto-char (agent-recall--transcript-header-end orgp))
-          (unless (bolp) (insert "\n"))
-          (insert line "\n\n")
-          (write-region (point-min) (point-max) filepath nil 'no-message))))))
+        (let ((moved (and (not orgp) (agent-recall--hoist-frontmatter))))
+          (goto-char (point-min))
+          (if (re-search-forward regexp (agent-recall--transcript-header-end orgp) t)
+              (unless (and (equal (match-string 0) line) (not moved))
+                (replace-match line t t)
+                (write-region (point-min) (point-max) filepath nil 'no-message))
+            (goto-char (agent-recall--transcript-header-end orgp))
+            (unless (bolp) (insert "\n"))
+            (insert line "\n\n")
+            (write-region (point-min) (point-max) filepath nil 'no-message)))))))
 
 (defun agent-recall--sync-session-metadata (shell-buffer)
   "Write SHELL-BUFFER's session metadata and refresh its index entry."
@@ -2962,11 +3019,10 @@ Only shows transcripts that have resolvable session IDs."
 
 (defun agent-recall--write-session-id-to-file (filepath session-id)
   "Insert SESSION-ID into the header of transcript at FILEPATH.
-For markdown files, inserts `**Session:** UUID' before the `---' separator.
+For markdown files, inserts `**Session:** UUID' before the `---' separator
+or below YAML frontmatter.
 For org files, inserts `#+PROPERTY: Session UUID' after existing properties.
-
-Skips writing when a session ID is already present, including agent-shell's
-native `**Session ID:**' / `#+PROPERTY: Session_ID' headers."
+Does nothing if a session ID header or frontmatter field is already present."
   (when (and filepath (file-exists-p filepath) session-id)
     (with-temp-buffer
       (insert-file-contents filepath)
@@ -2990,14 +3046,25 @@ native `**Session ID:**' / `#+PROPERTY: Session_ID' headers."
                 (end-of-line))
               (insert (format "\n#+PROPERTY: Session %s" session-id))
               (write-region (point-min) (point-max) filepath nil 'no-message)))
-        ;; Match both agent-recall's `**Session:**' and agent-shell's
-        ;; `**Session ID:**' so we do not duplicate headers.
-        (unless (re-search-forward "^\\*\\*Session\\(?: ID\\)?:\\*\\*" nil t)
-          (goto-char (point-min))
-          (when (re-search-forward "^---$" nil t)
-            (goto-char (match-beginning 0))
-            (insert (format "**Session:** %s\n\n" session-id))
-            (write-region (point-min) (point-max) filepath nil 'no-message)))))))
+        (when (agent-recall--hoist-frontmatter)
+          (write-region (point-min) (point-max) filepath nil 'no-message))
+        (goto-char (point-min))
+        (unless (or (re-search-forward "^\\*\\*Session\\(?: ID\\)?:\\*\\*" nil t)
+                    (agent-recall--markdown-header-field
+                     filepath "Session ID" "session_id"))
+          (let ((frontmatter (agent-recall--frontmatter)))
+            (cond
+             ((consp frontmatter)
+              (goto-char (agent-recall--transcript-header-end nil))
+              (unless (bolp) (insert "\n"))
+              (insert (format "**Session:** %s\n\n" session-id))
+              (write-region (point-min) (point-max) filepath nil 'no-message))
+             ((null frontmatter)
+              (goto-char (point-min))
+              (when (re-search-forward "^---$" nil t)
+                (goto-char (match-beginning 0))
+                (insert (format "**Session:** %s\n\n" session-id))
+                (write-region (point-min) (point-max) filepath nil 'no-message))))))))))
 
 ;;;###autoload
 (defun agent-recall-track-sessions ()
@@ -3078,9 +3145,9 @@ Add to your config:
 
 (defun agent-recall--read-embedded-session-id (file)
   "Read the session ID from transcript FILE header, if present.
-Supports markdown `**Session:** UUID' (agent-recall) and
-`**Session ID:** ID' (agent-shell native header), plus org
-`#+PROPERTY: Session ID' / `#+PROPERTY: Session_ID ID'.
+Supports markdown `**Session:**', `**Session ID:**', and YAML
+frontmatter `session_id', plus org `#+PROPERTY: Session' and
+`#+PROPERTY: Session_ID'.
 
 ID is a UUID (Claude Code, Codex) or an OpenCode session id
 \(`ses_…')."
@@ -3092,33 +3159,41 @@ ID is a UUID (Claude Code, Codex) or an OpenCode session id
             ;; OpenCode: ses_<base62/ulid-style token>
             "\\|"
             "ses_[A-Za-z0-9]+")))
-      (with-temp-buffer
-        (agent-recall--insert-transcript-header file)
-        (when (re-search-forward
-               (if (agent-recall--org-file-p file)
-                   (format "^#\\+PROPERTY:[ \t]+Session\\(?:_ID\\)?[ \t]+\\(%s\\)[ \t\r]*$"
-                           id-re)
-                 (format "^\\*\\*Session\\(?: ID\\)?:\\*\\*[ \t]+\\(%s\\)[ \t\r]*$"
-                         id-re))
-               (agent-recall--transcript-header-end
-                (agent-recall--org-file-p file)) t)
-          (match-string 1))))))
+      (or (with-temp-buffer
+            (agent-recall--insert-transcript-header file)
+            (when (re-search-forward
+                   (if (agent-recall--org-file-p file)
+                       (format "^#\\+PROPERTY:[ \t]+Session\\(?:_ID\\)?[ \t]+\\(%s\\)[ \t\r]*$"
+                               id-re)
+                     (format "^\\*\\*Session\\(?: ID\\)?:\\*\\*[ \t]+\\(%s\\)[ \t\r]*$"
+                             id-re))
+                   (agent-recall--transcript-header-end
+                    (agent-recall--org-file-p file)) t)
+              (match-string 1)))
+          (unless (agent-recall--org-file-p file)
+            (when-let* ((id (agent-recall--markdown-header-field
+                            file "Session ID" "session_id")))
+              (when (string-match-p (format "\\`\\(?:%s\\)\\'" id-re) id)
+                id)))))))
 
 (defun agent-recall--parse-transcript-timestamp (file)
   "Extract the `Started' timestamp from transcript FILE header.
 Returns an Emacs time value (as from `encode-time'), or nil.
-Supports markdown (`**Started:**') and org (`#+DATE:') formats."
+Supports markdown (`**Started:**' or frontmatter `started') and
+org (`#+DATE:') formats."
   (when (file-exists-p file)
-    (with-temp-buffer
-      (insert-file-contents file nil 0 500)
-      (goto-char (point-min))
-      (let ((regex (if (agent-recall--org-file-p file)
-                       "^#\\+DATE:\\s-+\\(.+\\)$"
-                     "^\\*\\*Started:\\*\\*\\s-+\\(.+\\)$")))
-        (when (re-search-forward regex nil t)
-          (let ((decoded (parse-time-string (match-string 1))))
-            (when (nth 5 decoded)
-              (encode-time (decoded-time-set-defaults decoded)))))))))
+    (when-let* ((started
+                (if (agent-recall--org-file-p file)
+                    (with-temp-buffer
+                      (insert-file-contents file nil 0 500)
+                      (goto-char (point-min))
+                      (when (re-search-forward "^#\\+DATE:\\s-+\\(.+\\)$" nil t)
+                        (match-string 1)))
+                  (agent-recall--markdown-header-field
+                   file "Started" "started"))))
+      (let ((decoded (parse-time-string started)))
+        (when (nth 5 decoded)
+          (encode-time (decoded-time-set-defaults decoded)))))))
 
 (defun agent-recall--parse-iso8601-timestamp (iso-string)
   "Parse ISO-STRING into an Emacs time value, or nil if unparseable."
