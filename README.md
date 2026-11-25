@@ -8,7 +8,7 @@ Search, browse, and resume [agent-shell](https://github.com/xenodium/agent-shell
 
 ## agent-recall
 
-[agent-shell](https://github.com/xenodium/agent-shell) automatically saves full conversation transcripts as Markdown or Org-mode files in `.agent-shell/transcripts/` within your projects (or in a separate directory via `agent-shell-org-transcript`). Over time these accumulate into a rich knowledge base of AI interactions, but there's no built-in way to search across them or resume past conversations.
+[agent-shell](https://github.com/xenodium/agent-shell) automatically saves full conversation transcripts as Markdown or Org-mode files in `.agent-shell/transcripts/` within your projects (or in a separate directory via `agent-shell-org-transcript`). It provides native session listing and resuming. Agent Recall adds cross-project archive search and resume directly from saved transcripts.
 
 agent-recall maintains a persistent index of all transcripts, provides fast full-text search, and can resume past agent-shell sessions from any transcript.
 
@@ -295,7 +295,13 @@ existing OpenCode transcripts resumable after updating.
 
 When you resume a session, agent-recall defaults to appending new messages to the **original transcript file** rather than creating a new one. This keeps the full conversation history in a single file.
 
-agent-recall uses the transcript's `**Agent:**` header to resume with the same agent configuration when possible. If the header is missing, it falls back to your `agent-shell` preferred/default selection.
+agent-recall reads the original agent and working directory from YAML frontmatter,
+legacy Markdown headers, or Org properties. If the agent cannot be identified or
+matched to an installed configuration, it prompts you to select one.
+
+The original transcript is attached only after the resumed session ID matches
+the requested ID. If the agent falls back to a different session, that session
+keeps its own transcript.
 
 > **Note:** Transcripts created by older versions of agent-shell may have a shortened agent name in the header (e.g., `Claude` instead of `Claude Code`). These won't auto-match a config and will prompt you to select one manually.
 
@@ -465,6 +471,24 @@ Session IDs are resolved in order:
 2. **Retroactive matching** — hybrid approach: narrows candidates by comparing the transcript's `started` / `**Started:**` (markdown) or `#+DATE:` (org-mode) timestamp against Claude session data in `~/.claude/projects/` (within `agent-recall-session-match-window` seconds), then confirms by comparing the first user message in the transcript against the first message in the Claude JSONL file
 
 The main index is persisted to disk and loads automatically. Retroactive matching results are cached in memory to avoid re-running the expensive JSONL comparison on every access.
+
+### Transcript metadata compatibility
+
+Native YAML metadata takes precedence over duplicate legacy fields. Existing
+Markdown and Org transcripts remain supported. Run `M-x agent-recall-reindex`
+after updating to refresh cached entries that were indexed before YAML support.
+
+Titles are read from either YAML `title:` or a Markdown `**Title:**` field before
+the conversation body. Updating an existing YAML title preserves that format;
+new titles use a Markdown field below the YAML block. Session tracking preserves
+native `session_id` values without inserting a duplicate. Older Recall headers
+above YAML are moved below it when metadata is next written. Unknown YAML fields
+and conversation text are preserved; no bulk migration is required.
+
+If resume still fails, check that the selected agent retains that session.
+Transcript metadata identifies a session but cannot recreate an expired or
+deleted agent session. Personal labels, catalogue notes, and preferences remain
+in Recall's separate sidecar store.
 
 ### Search directory
 
