@@ -409,10 +409,13 @@
               #'agent-recall-consult--final-accept)))
 
 (ert-deftest test-picker-header-consistently-labels-back-action ()
-  "The transcript header should label the `b' action as Back."
+  "The transcript header should label the return action as Back."
   (with-temp-buffer
+    (setq-local agent-recall-transcript-mode t)
     (should (string-match-p "Back" (agent-recall--header-line nil)))
-    (should-not (string-match-p "Browse" (agent-recall--header-line nil)))
+    ;; Unbound commands appear by name; "browse" in the command is not a label.
+    (let ((case-fold-search nil))
+      (should-not (string-match-p "Browse" (agent-recall--header-line nil))))
     (let ((session
            (agent-recall--navigation-session-create
             :id "session"

@@ -104,7 +104,7 @@ Binds `file-a' (session `id-a', project alpha, newer) and `file-b'
 ;;;; Transcript mode
 
 (ert-deftest test-catalogue-transcript-mode-key ()
-  "`s' in transcript-mode catalogues the transcript."
+  "The default transcript map exposes the catalogue command."
   (should (eq #'agent-recall-catalogue
               (lookup-key agent-recall-transcript-mode-map (kbd "s")))))
 

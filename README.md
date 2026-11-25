@@ -214,9 +214,9 @@ a title keep the usual project and timestamp display.
 
 `M-x agent-recall-search-live` opens a live-filtering search. It auto-selects the best available backend (`counsel-rg` or `consult-ripgrep`); falls back to a one-shot search if neither is installed.
 
-`M-x agent-recall-consult-search` provides a richer Consult interface when `consult` and `ripgrep` are installed. It groups matches by transcript and shows candidates in `[project] [match-count] date first-match` format, then jumps to the first match in the selected transcript. With Vertico's `vertico-suspend` extension available, `RET` visits a result without closing the search; `b` returns to the exact query, result, and matched line.
+`M-x agent-recall-consult-search` provides a richer Consult interface when `consult` and `ripgrep` are installed. It groups matches by transcript and shows candidates in `[project] [match-count] date first-match` format, then jumps to the first match in the selected transcript. With Vertico's `vertico-suspend` extension available, `RET` visits a result without closing the search; `M-x agent-recall-browse-from-transcript` returns to the exact query, result, and matched line.
 
-Transcripts visited from Agent Recall's grep and deadgrep result buffers also remember their exact result buffer and point; press `b` to return there.
+Transcripts visited from Agent Recall's grep and deadgrep result buffers also remember their exact result buffer and point; run `M-x agent-recall-browse-from-transcript` to return there.
 
 ### Browsing transcripts
 
@@ -236,9 +236,9 @@ When Consult, Vertico, and `vertico-suspend` are available, Browse preserves the
 | `M-RET` | Accept normally, close the picker, and keep the transcript open |
 | `C-g` | Abort the picker and restore the pre-picker window state |
 
-Press `b` in the visited transcript to return to the same input, candidate order, selected item, viewport, and preview. The candidate list is a snapshot: edits do not reorder it, and newly created transcripts appear the next time Browse is opened. Press `q` to close the transcript and abort its suspended picker cleanly.
+Run `M-x agent-recall-browse-from-transcript` in the visited transcript to return to the same input, candidate order, selected item, viewport, and preview. The candidate list is a snapshot: edits do not reorder it, and newly created transcripts appear the next time Browse is opened. Run `M-x agent-recall-quit-transcript` to close the transcript and abort its suspended picker cleanly.
 
-If Consult, Vertico, `vertico-suspend`, or automatic transcript mode is unavailable, Browse retains its one-shot behavior and transcript `b` opens a fresh picker. If a recorded picker later becomes stale, `b` safely discards that link and falls back to a fresh Browse picker.
+If Consult, Vertico, `vertico-suspend`, or automatic transcript mode is unavailable, Browse retains its one-shot behavior and `M-x agent-recall-browse-from-transcript` opens a fresh picker. If a recorded picker later becomes stale, `M-x agent-recall-browse-from-transcript` safely discards that link and falls back to a fresh Browse picker.
 
 #### Embark integration
 
@@ -270,10 +270,10 @@ You can always toggle it manually with `M-x agent-recall-transcript-mode`, or en
 
 There are two ways to resume a past session:
 
-- Press `r` in transcript mode to resume that transcript's session
+- Run `M-x agent-recall-resume-current` in transcript mode to resume that transcript's session
 - `M-x agent-recall-resume` to pick from all resumable transcripts
 
-If the session is already running in an agent-shell buffer, `r` will switch to that buffer instead of starting a new one. Press `R` to force a fresh resume regardless.
+If the session is already running in an agent-shell buffer, `M-x agent-recall-resume-current` will switch to that buffer instead of starting a new one. Run `M-x agent-recall-force-resume-current` to force a fresh resume regardless.
 
 Requires agent-shell to be loaded.
 
@@ -357,31 +357,18 @@ Note: In my experience, Claude chats get offloaded, so there's a good chance tha
 
 ### Key bindings
 
-In `agent-recall-transcript-mode`:
+`agent-recall-transcript-mode` keeps its default bindings:
 
-| Key | Command |
-|-----|---------|
-| `r` | Resume session — switches to existing buffer if already running |
-| `R` | Force resume — always starts a new agent-shell buffer |
-| `c` | Open clean view (strip tool calls) |
-| `b` | Return to the exact picker/result origin, or open a fresh Browse picker |
-| `C-c C-n` | Jump to next user message |
-| `C-c C-p` | Jump to previous user message |
-| `q` | Close the transcript and abort any suspended picker |
+- `r` resumes, `R` forces resume, and `c` opens a clean view.
+- `b` returns to the picker, `s` catalogues the session, and `q` quits.
+- `C-c C-n` / `C-c C-p` navigate user messages.
+- In Evil normal state, `C-j` / `C-k`, `]]` / `[[`, and `gj` / `gk`
+  also navigate user messages.
 
-#### Evil
-
-Evil users get additional bindings in normal state:
-
-| Key | Command |
-|-----|---------|
-| `]]` | Next user message |
-| `[[` | Previous user message |
-| `gj` | Next user message |
-| `gk` | Previous user message |
-| `C-j` | Next user message |
-| `C-k` | Previous user message |
-| `q` | Close the transcript and abort any suspended picker |
+Customize `agent-recall-transcript-mode-map` in your own configuration;
+Evil users can override its normal-state bindings with `evil-define-key*`.
+The header displays the active bindings, including your overrides. Unbound
+actions are shown as `M-x` commands. No `C-c r` prefix is installed.
 
 ## Customizations
 
@@ -408,7 +395,7 @@ Evil users get additional bindings in normal state:
 
 A catalogued session is one you kept on purpose: the existing transcript, flagged in the sidecar metadata store with an ISO timestamp, an optional note (why you kept it) and optional tags. Nothing is copied and nothing touches Emacs bookmarks. Uncataloguing drops the flag only, so the note and tags come back on a later re-save.
 
-- `agent-recall-catalogue` saves or edits. It resolves the session from a live agent-shell buffer, a transcript-mode buffer, or the highlighted candidate of a Browse picker, then prompts for the note and the tags (with completion over tags already in use). In transcript mode it is on `s`; on Browse candidates it is the embark action `k`.
+- `agent-recall-catalogue` saves or edits. It resolves the session from a live agent-shell buffer, a transcript-mode buffer, or the highlighted candidate of a Browse picker, then prompts for the note and the tags (with completion over tags already in use). In transcript mode, run `M-x agent-recall-catalogue` or bind it in your configuration; on Browse candidates it is the embark action `k`.
 - `agent-recall-uncatalogue` removes the flag.
 - `agent-recall-catalogue-browse` lists catalogued sessions newest save first, with `#tags` on the row and the note as the annotation. A prefix argument narrows to one tag.
 - `agent-recall-browse` with a prefix argument shows catalogued sessions only.

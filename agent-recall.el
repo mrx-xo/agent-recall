@@ -2393,6 +2393,15 @@ buffer name.  Unescaped, \"cut latency 50% on startup\" renders as
           (propertize (string-replace "%" "%%" label)
                       'face 'agent-recall-header-label)))
 
+(defun agent-recall--header-key (command)
+  "Describe the shortest active key for COMMAND in the current buffer.
+Use the command name when it has no active binding."
+  (let ((keys (sort (where-is-internal command)
+                    (lambda (a b) (< (length a) (length b))))))
+    (if keys
+        (key-description (car keys))
+      (concat "M-x " (symbol-name command)))))
+
 (defun agent-recall--header-line (&optional session-id)
   "Build the header line string for transcript mode.
 When SESSION-ID is non-nil, include a resume entry."
@@ -2401,24 +2410,34 @@ When SESSION-ID is non-nil, include a resume entry."
                        (agent-recall--find-session-buffer session-id))))
     (when session-id
       (push (agent-recall--header-entry
-             "r" (if existing
+             (agent-recall--header-key #'agent-recall-resume-current) (if existing
                      (format "Resume (%s)" (buffer-name existing))
                    (format "Resume (%s)" (substring session-id 0 (min 8 (length session-id))))))
             entries)
       (when existing
-        (push (agent-recall--header-entry "R" "Force Resume") entries)))
-    (push (agent-recall--header-entry "c" "Clean") entries)
-    (push (agent-recall--header-entry "b" "Back") entries)
+        (push (agent-recall--header-entry
+               (agent-recall--header-key #'agent-recall-force-resume-current)
+               "Force Resume") entries)))
+    (push (agent-recall--header-entry
+           (agent-recall--header-key #'agent-recall-clean-view) "Clean") entries)
+    (push (agent-recall--header-entry
+           (agent-recall--header-key #'agent-recall-browse-from-transcript) "Back") entries)
     (let ((entry (and session-id (agent-recall-catalogue-get session-id))))
       (push (agent-recall--header-entry
-             "s" (cond ((alist-get 'note entry)
+             (agent-recall--header-key #'agent-recall-catalogue)
+             (cond ((alist-get 'note entry)
                         (format "Catalogued: %s" (alist-get 'note entry)))
                        (entry "Catalogued")
                        (t "Save")))
             entries))
-    (push (agent-recall--header-entry "C-j/C-k" "Navigate") entries)
-    (push (agent-recall--header-entry "q" "Quit") entries)
-    (concat "  " (mapconcat #'identity (nreverse entries) "  "))))
+    (push (agent-recall--header-entry
+           (concat (agent-recall--header-key #'agent-recall-next-user-message)
+                   "/" (agent-recall--header-key #'agent-recall-prev-user-message))
+           "Navigate") entries)
+    (push (agent-recall--header-entry
+           (agent-recall--header-key #'agent-recall-quit-transcript) "Quit") entries)
+    (concat "  "
+            (mapconcat #'identity (nreverse entries) "  "))))
 
 (defun agent-recall--metadata-summary (metadata)
   "Format METADATA alist as a single-line summary for the echo area."
@@ -2433,6 +2452,8 @@ When SESSION-ID is non-nil, include a resume entry."
 (define-minor-mode agent-recall-transcript-mode
   "Minor mode for viewing agent-recall transcripts.
 When the transcript has a resumable session ID, press `r' to resume.
+Customize `agent-recall-transcript-mode-map' in your configuration.
+The header shows active bindings, or command names for unbound actions.
 When the session has saved metadata (model, effort, labels, etc.),
 a summary is shown in the echo area."
   :lighter " Recall"
@@ -2451,7 +2472,12 @@ a summary is shown in the echo area."
       (agent-recall--navigation-transcript-killed))
     (read-only-mode -1)
     (kill-local-variable 'agent-recall--transcript-session-id)
-    (kill-local-variable 'header-line-format)))
+    (kill-local-variable 'header-line-format))
+  ;; Recall can be enabled after Evil has already cached its active maps.
+  ;; Do not initialize Evil here: globalized-mode hooks can run before it.
+  (when (and (bound-and-true-p evil-local-mode)
+             (fboundp 'evil-normalize-keymaps))
+    (evil-normalize-keymaps)))
 
 (defun agent-recall--transcript-file-p (file)
   "Return non-nil if FILE is inside an agent-shell transcript directory.

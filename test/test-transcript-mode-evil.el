@@ -79,5 +79,45 @@ buffer is left without evil and in `fundamental-mode'."
       ;; `s' is evil-snipe in the user's config; the mode map must win.
       (should (eq (key-binding (kbd "s")) #'agent-recall-catalogue)))))
 
+(ert-deftest test-transcript-mode-defaults-without-evil ()
+  "Standard transcript actions remain available without Evil."
+  (with-transcript-test-file
+    (with-current-buffer (find-file-noselect file)
+      (evil-local-mode -1)
+      (agent-recall-transcript-mode 1)
+      (dolist (binding '(("r" . agent-recall-resume-current)
+                         ("R" . agent-recall-force-resume-current)
+                         ("c" . agent-recall-clean-view)
+                         ("b" . agent-recall-browse-from-transcript)
+                         ("s" . agent-recall-catalogue)
+                         ("q" . agent-recall-quit-transcript)
+                         ("C-c C-n" . agent-recall-next-user-message)
+                         ("C-c C-p" . agent-recall-prev-user-message)))
+        (should (eq (key-binding (kbd (car binding))) (cdr binding)))))))
+
+(ert-deftest test-transcript-mode-personal-overrides-update-header ()
+  "User overrides survive mode activation and appear in the header."
+  (let ((saved-map (copy-keymap agent-recall-transcript-mode-map)))
+    (unwind-protect
+        (progn
+          (define-key agent-recall-transcript-mode-map (kbd "b") nil)
+          (define-key agent-recall-transcript-mode-map (kbd "s") nil)
+          (evil-define-key* 'normal agent-recall-transcript-mode-map
+            (kbd "b") nil
+            (kbd "s") nil
+            (kbd "u") #'agent-recall-browse-from-transcript
+            (kbd "a") #'agent-recall-catalogue)
+          (with-transcript-test-file
+            (with-current-buffer (find-file-noselect file)
+              (evil-local-mode 1)
+              (evil-normal-state)
+              (agent-recall-transcript-mode 1)
+              (should (eq (key-binding (kbd "u")) #'agent-recall-browse-from-transcript))
+              (should (eq (key-binding (kbd "a")) #'agent-recall-catalogue))
+              (should (eq (key-binding (kbd "b")) #'evil-backward-word-begin))
+              (should (string-match-p "u Back" (agent-recall--header-line nil)))
+              (should (string-match-p "a Save" (agent-recall--header-line nil))))))
+      (setcdr agent-recall-transcript-mode-map (cdr saved-map)))))
+
 (provide 'test-transcript-mode-evil)
 ;;; test-transcript-mode-evil.el ends here
