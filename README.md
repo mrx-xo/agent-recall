@@ -484,6 +484,9 @@ new titles use a Markdown field below the YAML block. Session tracking preserves
 native `session_id` values without inserting a duplicate. Older Recall headers
 above YAML are moved below it when metadata is next written. Unknown YAML fields
 and conversation text are preserved; no bulk migration is required.
+The reader targets agent-shell's flat metadata format. Hand-edited multiline
+YAML titles are not supported; attempts to update them leave the file unchanged
+and report an error.
 
 If resume still fails, check that the selected agent retains that session.
 Transcript metadata identifies a session but cannot recreate an expired or

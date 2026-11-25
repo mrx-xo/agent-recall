@@ -1312,7 +1312,14 @@ transcripts do not require reading the conversation body."
              (erase-buffer)
              (insert-file-contents file nil 0 limit)
              (setq end (agent-recall--transcript-header-end orgp))
-             (and (= end (point-max)) (< limit size)))
+             ;; A chunk ending at the opening --- (or its next partial
+             ;; field) can look like the legacy header's final separator.
+             ;; Read enough lookahead to distinguish those two cases.
+             (and (< limit size)
+                  (save-excursion
+                    (goto-char end)
+                    (forward-line 2)
+                    (eobp))))
       (setq limit (* 2 limit)))
     (delete-region end (point-max))
     (goto-char (point-min))))
@@ -3024,6 +3031,10 @@ Only shows transcripts that have resolvable session IDs."
                       ((consp frontmatter)))
             (goto-char (nth 1 frontmatter))
             (when (re-search-forward "^title:[^\n]*$" (nth 2 frontmatter) t)
+              ;; Native agent-shell titles are single-line scalars.  Do not
+              ;; leave orphaned continuation lines in hand-edited YAML.
+              (when (string-match-p "^title:[ \t]*[>|]" (match-string 0))
+                (user-error "Cannot update a multiline YAML title"))
               (setq line (concat "title: " (json-encode-string title))
                     regexp "^title:[^\n]*$")))
           (goto-char (point-min))
@@ -3083,7 +3094,8 @@ Does nothing if a session ID header or frontmatter field is already present."
         (when (agent-recall--hoist-frontmatter)
           (write-region (point-min) (point-max) filepath nil 'no-message))
         (goto-char (point-min))
-        (unless (or (re-search-forward "^\\*\\*Session\\(?: ID\\)?:\\*\\*" nil t)
+        (unless (or (re-search-forward "^\\*\\*Session\\(?: ID\\)?:\\*\\*"
+                                       (agent-recall--transcript-header-end nil) t)
                     (agent-recall--markdown-header-field
                      filepath "Session ID" "session_id"))
           (let ((frontmatter (agent-recall--frontmatter)))

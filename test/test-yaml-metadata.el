@@ -158,4 +158,30 @@
       (should (search-forward "title: \"A \\\"quoted\\\" title\"" nil t))
       (should (string-suffix-p "## User\nKeep this body.\n**Title:** body example\n---\nagent: Claude\n---\n" (buffer-string))))))
 
+(ert-deftest recall-yaml-chunk-boundary-does-not-hide-frontmatter ()
+  (cl-loop for size from 2970 to 3005 do
+           (agent-recall-yaml-test--with-file
+               (concat "**Title:** " (make-string size ?x) "\n\n")
+             (should (equal "Codex" (agent-recall--read-agent-name file)))
+             (should (equal sid (agent-recall--read-embedded-session-id file))))))
+
+(ert-deftest recall-yaml-body-session-example-does-not-prevent-id-write ()
+  (agent-recall-yaml-test--with-file ""
+    (with-temp-file file
+      (insert "---\nagent: \"Codex\"\n---\n\n## User\n**Session:** ses_Example\n"))
+    (agent-recall--write-session-id-to-file file sid)
+    (should (equal sid (agent-recall--read-embedded-session-id file)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (should (string-suffix-p "## User\n**Session:** ses_Example\n" (buffer-string))))))
+
+(ert-deftest recall-yaml-multiline-title-write-leaves-file-untouched ()
+  (agent-recall-yaml-test--with-file ""
+    (with-temp-file file
+      (insert "---\nagent: Codex\ntitle: |\n  Old title\nmodel: preserved\n---\n\n## User\nBody\n"))
+    (let ((before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+      (should-error (agent-recall--write-session-title-to-file file "New title")
+                    :type 'user-error)
+      (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string)))))))
+
 (provide 'test-yaml-metadata)
