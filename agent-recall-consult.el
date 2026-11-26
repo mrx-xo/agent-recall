@@ -95,6 +95,9 @@
 (defvar-local agent-recall-consult--picker-lookup nil
   "Candidate lookup owned by the current picker minibuffer.")
 
+(defvar-local agent-recall-consult--picker-state nil
+  "Consult preview state function owned by the current picker minibuffer.")
+
 (defgroup agent-recall-consult nil
   "Rich Consult backend for agent-recall."
   :group 'agent-recall
@@ -259,8 +262,13 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
     (agent-recall--navigation-request-abort session))
    (t
     (condition-case err
-        (with-selected-window
-            (agent-recall--navigation-session-origin-window session)
+        (progn
+          ;; Select, do not `with-selected-window': display rules may
+          ;; route the transcript elsewhere (a dedicated agent-shell pane
+          ;; with `switch-to-buffer-obey-display-actions'), and focus
+          ;; must follow it rather than snap back to the origin.
+          (select-window
+           (agent-recall--navigation-session-origin-window session))
           (agent-recall--open-transcript file nil line t)
           (agent-recall--navigation-attach session (current-buffer)))
       (error
@@ -287,6 +295,11 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
       (user-error "No active Agent Recall Vertico picker"))
     (unless (and file (file-exists-p file))
       (user-error "The selected candidate has no live transcript file"))
+    ;; A preview can still visit FILE until Consult's next pre-command hook.
+    ;; Release it before opening the transcript, or `find-file' can reuse a
+    ;; temporary buffer which Consult then kills, orphaning this session.
+    (when agent-recall-consult--picker-state
+      (funcall agent-recall-consult--picker-state 'preview nil))
     (setf (agent-recall--navigation-session-selected-file session) file
           (agent-recall--navigation-session-selected-line session) line
           (agent-recall--navigation-session-state session) 'suspending)
@@ -296,8 +309,8 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
             (vertico-suspend)
             (setq did-suspend t)
             (setf (agent-recall--navigation-session-state session) 'suspended)
-            ;; Give Consult's window-selection hook one turn to promote a
-            ;; temporary preview before opening the fully initialized file.
+            ;; Open outside the minibuffer command after suspension settles.
+            ;; Preview ownership was already released synchronously above.
             (run-at-time 0 nil #'agent-recall-consult--activate-selection
                          session file line))
         (error
@@ -322,11 +335,12 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
     map)
   "Command-specific keymap for suspendable Agent Recall pickers.")
 
-(defun agent-recall-consult--setup-picker (session lookup)
-  "Attach SESSION and candidate LOOKUP to the current minibuffer."
+(defun agent-recall-consult--setup-picker (session lookup &optional state)
+  "Attach SESSION, candidate LOOKUP and preview STATE to this minibuffer."
   (setf (agent-recall--navigation-session-minibuffer session) (current-buffer))
   (setq-local agent-recall--picker-navigation-session session)
-  (setq-local agent-recall-consult--picker-lookup lookup))
+  (setq-local agent-recall-consult--picker-lookup lookup)
+  (setq-local agent-recall-consult--picker-state state))
 
 (defun agent-recall-consult--suspendable-read (kind table options lookup)
   "Run a suspendable Consult read of KIND over TABLE with OPTIONS and LOOKUP."
@@ -334,6 +348,7 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
          (agent-recall--navigation-new-session
           kind 'suspended
           :origin-window (selected-window)
+          :origin-buffer (current-buffer)
           :valid-function #'agent-recall-consult--session-valid-p
           :resume-function #'agent-recall-consult--resume-session
           :abort-function #'agent-recall-consult--abort-session)))
@@ -343,9 +358,18 @@ When SUSPENDED is non-nil, also require Vertico's suspension overlay."
           (setq read-options
                 (plist-put read-options :keymap agent-recall-consult--picker-map))
           (minibuffer-with-setup-hook
-              (lambda () (agent-recall-consult--setup-picker session lookup))
+              (lambda () (agent-recall-consult--setup-picker
+                          session lookup (plist-get read-options :state)))
             (apply #'consult--read table read-options)))
-      (agent-recall--navigation-cleanup session))))
+      (let ((configuration
+             (agent-recall--navigation-session-quit-window-configuration session)))
+        (agent-recall--navigation-cleanup session)
+        (when (and (window-configuration-p configuration)
+                   (frame-live-p (window-configuration-frame configuration)))
+          ;; The configuration was captured while the picker was active, so
+          ;; its mini-window still shows the expired minibuffer.  Restoring
+          ;; that would leave Vertico's stale overlays on screen.
+          (set-window-configuration configuration nil t))))))
 
 (defun agent-recall-consult--browse-read (candidates annotate-function)
   "Read Browse CANDIDATES with Consult and ANNOTATE-FUNCTION."

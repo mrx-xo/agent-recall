@@ -380,6 +380,11 @@ Evil users can override its normal-state bindings with `evil-define-key*`.
 The header displays the active bindings, including your overrides. Unbound
 actions are shown as `M-x` commands. No `C-c r` prefix is installed.
 
+`M-x agent-recall-quit-transcript` buries the transcript and aborts its
+suspended picker while preserving the current pane layout and any resumed
+conversation. Older transcripts in the pane history are skipped, so one
+quit leaves the Recall view. It does not stop the agent.
+
 ## Customizations
 
 | Custom variable | Description |

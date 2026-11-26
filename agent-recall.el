@@ -402,7 +402,7 @@ Keys are absolute file paths, values are plists
   "Origin information for a transcript navigation session."
   id kind backend minibuffer origin-window selected-file selected-line
   transcript-buffer origin-buffer origin-marker valid-function
-  resume-function abort-function state)
+  resume-function abort-function state quit-window-configuration)
 
 (defvar agent-recall--navigation-session-counter 0
   "Monotonic counter used to create navigation session identifiers.")
@@ -2349,23 +2349,68 @@ plain markdown buffer you can render with your preferred method."
       (quit-window)
       (agent-recall-browse)))))
 
+(defun agent-recall--quit-replacement-p (buffer transcript)
+  "Return non-nil if BUFFER can replace TRANSCRIPT when leaving Recall."
+  (and (buffer-live-p buffer)
+       (not (eq buffer transcript))
+       (not (string-prefix-p " Preview:" (buffer-name buffer)))
+       (with-current-buffer buffer
+         (not (or (bound-and-true-p agent-recall-transcript-mode)
+                  (agent-recall--transcript-file-p buffer-file-name))))))
+
 (defun agent-recall-quit-transcript ()
-  "Close the transcript and cleanly abort any suspended picker."
+  "Dismiss the transcript and its picker without rearranging panes.
+Bury the transcript buffer; leave any resumed conversation running."
   (interactive)
-  (let ((session (car agent-recall--navigation-origins)))
+  (let ((session (car agent-recall--navigation-origins))
+        (transcript (current-buffer)))
+    ;; `quit-window' may delete a pane or restore stale `quit-restore'
+    ;; information.  Replace only the transcript in the selected pane.
+    (when (eq (window-buffer (selected-window)) transcript)
+      (let* ((window (selected-window))
+             (dedicated (window-dedicated-p window))
+             (origin (and session
+                          (agent-recall--navigation-session-origin-buffer session))))
+        (unwind-protect
+            (progn
+              (set-window-dedicated-p window nil)
+              (if (and (agent-recall--quit-replacement-p origin transcript)
+                       (eq window (agent-recall--navigation-session-origin-window session)))
+                  (set-window-buffer window origin)
+                (switch-to-prev-buffer window 'bury))
+              ;; History can contain earlier results, and side windows can
+              ;; refuse to switch.  Quit must leave Recall in either case.
+              (unless (agent-recall--quit-replacement-p
+                       (window-buffer window) transcript)
+                (set-window-buffer
+                 window
+                 (or (seq-find
+                      (lambda (buffer)
+                        (agent-recall--quit-replacement-p buffer transcript))
+                      (append (mapcar #'car (window-prev-buffers window))
+                              (seq-remove
+                               (lambda (buffer)
+                                 (string-prefix-p " " (buffer-name buffer)))
+                               (buffer-list (window-frame window)))))
+                     (get-buffer-create "*scratch*")))))
+          (set-window-dedicated-p window dedicated))))
+    (bury-buffer transcript)
     (cond
      ((and session
            (eq (agent-recall--navigation-session-backend session) 'suspended)
            (agent-recall--navigation-session-valid-p session))
-     (agent-recall--navigation-request-abort session))
+      ;; Consult's preview/minibuffer unwind restores its original view.
+      ;; Reapply the layout at quit time after that unwind has finished.
+      (setf (agent-recall--navigation-session-quit-window-configuration session)
+            (current-window-configuration))
+      (agent-recall--navigation-request-abort session))
      (t
       (when session
         (if (eq (agent-recall--navigation-session-backend session) 'suspended)
             (progn
               (agent-recall--navigation-detach session)
               (agent-recall--navigation-schedule-orphan-abort))
-          (agent-recall--navigation-cleanup session)))
-      (quit-window)))))
+          (agent-recall--navigation-cleanup session)))))))
 
 (defvar agent-recall-transcript-mode-map
   (let ((map (make-sparse-keymap)))
