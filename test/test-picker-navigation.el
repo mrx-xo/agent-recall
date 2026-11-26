@@ -9,6 +9,7 @@
 (require 'ert)
 (require 'agent-recall)
 
+(defvar agent-recall-consult--picker-state)
 (defvar agent-recall-consult--picker-map)
 (defvar agent-recall-consult--read-lookup)
 (defvar agent-recall-consult--identity-ids)
@@ -199,6 +200,63 @@
         (should (eq 'closed
                     (agent-recall--navigation-session-state session)))
         (should-not agent-recall--navigation-origins)))))
+
+(ert-deftest test-picker-quit-preserves-transcript-window ()
+  "Quit must dismiss transcripts even in side or dedicated panes."
+  (let ((transcript (generate-new-buffer " *recall-quit-test*")))
+    (unwind-protect
+        (dolist (kind '(side dedicated regular))
+          (save-window-excursion
+            (delete-other-windows)
+            (if (eq kind 'side)
+                (select-window (display-buffer-in-side-window
+                                transcript '((side . right))))
+              (pop-to-buffer transcript '(display-buffer-pop-up-window)))
+            (when (eq kind 'dedicated)
+              (set-window-dedicated-p (selected-window) t))
+            (let ((windows (window-list))
+                  (dedicated (window-dedicated-p))
+                  (edges (mapcar #'window-edges (window-list))))
+              (agent-recall-quit-transcript)
+              (should (equal windows (window-list)))
+              (should (equal edges (mapcar #'window-edges (window-list))))
+              (should (eq dedicated (window-dedicated-p)))
+              (should-not (get-buffer-window transcript)))))
+      (kill-buffer transcript))))
+
+(ert-deftest test-picker-quit-preserves-layout-after-consult-unwind ()
+  "Consult cleanup must not undo panes and buffers added after suspension."
+  (require 'agent-recall-consult)
+  (let ((transcript (generate-new-buffer " *recall-quit-transcript*"))
+        (chat (generate-new-buffer " *recall-quit-chat*"))
+        expected)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (cl-letf (((symbol-function 'consult--read)
+                     (lambda (&rest _)
+                       ;; Model Consult's cleanup restoring its original view.
+                       (save-window-excursion
+                         (switch-to-buffer transcript)
+                         (set-window-buffer (split-window-right) chat)
+                         (let ((session (car agent-recall--navigation-sessions)))
+                           (setf (agent-recall--navigation-session-valid-function session)
+                                 (lambda (_) t)
+                                 (agent-recall--navigation-session-abort-function session)
+                                 (lambda (_) (signal 'quit nil)))
+                           (agent-recall--navigation-attach session transcript)
+                           (setq expected (mapcar #'window-edges (window-list)))
+                           (agent-recall-quit-transcript))))))
+            (condition-case nil
+                (agent-recall-consult--suspendable-read
+                 'browse '("one") nil (make-hash-table :test #'equal))
+              (quit nil)))
+          (should (equal expected (mapcar #'window-edges (window-list))))
+          (should (get-buffer-window chat))
+          (should-not (get-buffer-window transcript))
+          (should-not agent-recall--navigation-sessions))
+      (kill-buffer transcript)
+      (kill-buffer chat))))
 
 (ert-deftest test-picker-persistent-origin-restores-buffer-and-marker ()
   "Back should restore a persistent result buffer at its recorded marker."
@@ -409,10 +467,13 @@
               #'agent-recall-consult--final-accept)))
 
 (ert-deftest test-picker-header-consistently-labels-back-action ()
-  "The transcript header should label the `b' action as Back."
+  "The transcript header should label the return action as Back."
   (with-temp-buffer
+    (setq-local agent-recall-transcript-mode t)
     (should (string-match-p "Back" (agent-recall--header-line nil)))
-    (should-not (string-match-p "Browse" (agent-recall--header-line nil)))
+    ;; Unbound commands appear by name; "browse" in the command is not a label.
+    (let ((case-fold-search nil))
+      (should-not (string-match-p "Browse" (agent-recall--header-line nil))))
     (let ((session
            (agent-recall--navigation-session-create
             :id "session"
@@ -564,6 +625,122 @@
           (should-not (buffer-live-p picker)))
       (when (buffer-live-p picker) (kill-buffer picker))
       (when (buffer-live-p other) (kill-buffer other)))))
+
+(ert-deftest test-picker-visit-keeps-focus-on-rerouted-transcript ()
+  "RET must leave focus on the transcript when display rules move it.
+With `switch-to-buffer-obey-display-actions' and a dedicated origin
+window (an agent-shell pane), `find-file' shows the transcript in
+another window.  The activation step must not restore the origin."
+  (skip-unless (require 'agent-recall-consult nil t))
+  (agent-recall-test--with-files ((file "2026-01-01-00-00-00.md"))
+    (let ((origin (generate-new-buffer " *recall-visit-origin*"))
+          (switch-to-buffer-obey-display-actions t)
+          transcript)
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer origin)
+            (split-window-right)
+            (set-window-dedicated-p (selected-window) t)
+            (let ((session
+                   (agent-recall--navigation-session-create
+                    :id "visit" :kind 'browse :backend 'suspended
+                    :state 'suspended
+                    :origin-window (selected-window)
+                    :origin-buffer origin)))
+              (cl-letf (((symbol-function 'agent-recall-consult--session-valid-p)
+                         (lambda (_session) t)))
+                (agent-recall-consult--activate-selection session file 1))
+              (setq transcript (get-file-buffer file))
+              (should (buffer-live-p transcript))
+              (should (eq (agent-recall--navigation-session-transcript-buffer
+                           session)
+                          transcript))
+              (should (eq (window-buffer (selected-window)) transcript))))
+        (when (buffer-live-p transcript) (kill-buffer transcript))
+        (kill-buffer origin)))))
+
+(ert-deftest test-picker-ret-detaches-temporary-preview-before-visit ()
+  "RET must not attach navigation to a preview awaiting disassociation."
+  (skip-unless (require 'agent-recall-consult nil t))
+  (dolist (kind '(browse search))
+    (let* ((file (agent-recall--canonical-file
+                  (make-temp-file "recall-preview-race-" nil ".md"
+                                  "one\nmatch\n")))
+           (session (agent-recall--navigation-session-create
+                     :id "race" :kind kind :backend 'suspended :state 'picker
+                     :origin-window (selected-window)))
+           (candidate (agent-recall--make-candidate "match" file 2 kind))
+           (pre-command-hook pre-command-hook)
+           (window-selection-change-functions window-selection-change-functions)
+           (agent-recall--picker-navigation-session session)
+           (agent-recall-consult--picker-lookup nil)
+           state preview transcript)
+      (unwind-protect
+          (save-window-excursion
+            (cl-letf (((symbol-function 'consult--buffer-preview) (lambda () #'ignore))
+                      ((symbol-function 'consult--jump-state) (lambda () #'ignore))
+                      ((symbol-function 'agent-recall-consult--current-candidate)
+                       (lambda () candidate))
+                      ((symbol-function 'agent-recall-consult--picker-structurally-valid-p)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'agent-recall-consult--session-valid-p)
+                       (lambda (_) t))
+                      ((symbol-function 'vertico-suspend) #'ignore)
+                      ((symbol-function 'run-at-time)
+                       (lambda (_time _repeat fn &rest args) (apply fn args))))
+              (setq state (if (eq kind 'browse)
+                              (agent-recall-consult--browse-preview-state)
+                            (agent-recall-consult--state)))
+              (funcall state 'preview candidate)
+              (setq preview (get-file-buffer file))
+              ;; No intervening pre-command hook: Consult still owns this buffer.
+              (should (buffer-live-p preview))
+              (should (string-prefix-p " Preview:" (buffer-name preview)))
+              (let ((agent-recall-consult--picker-state state))
+                (agent-recall-consult--visit))
+              (setq transcript
+                    (agent-recall--navigation-session-transcript-buffer session))
+              (should (buffer-live-p transcript))
+              (should-not (eq preview transcript))
+              (should (= 2 (with-current-buffer transcript (line-number-at-pos))))
+              ;; Later preview cleanup must leave the visited transcript alive.
+              (funcall state 'preview nil)
+              (should (buffer-live-p transcript))))
+        (agent-recall--navigation-detach session)
+        (when state (funcall state 'preview nil))
+        (when-let* ((buffer (get-file-buffer file))) (kill-buffer buffer))
+        (delete-file file)))))
+
+(ert-deftest test-picker-quit-skips-older-transcripts ()
+  "One quit must leave Recall even when a previous result is in pane history."
+  (let ((normal (generate-new-buffer "recall-quit-normal"))
+        (older (generate-new-buffer "recall-quit-older"))
+        (current (generate-new-buffer "recall-quit-current")))
+    (unwind-protect
+        (dolist (kind '(regular dedicated side))
+          (save-window-excursion
+            (select-window (frame-first-window))
+            (delete-other-windows)
+            (switch-to-buffer normal)
+            (if (eq kind 'side)
+                (select-window (display-buffer-in-side-window older '((side . right))))
+              (switch-to-buffer older))
+            (setq-local agent-recall-transcript-mode t)
+            (set-window-buffer (selected-window) current)
+            (set-buffer current)
+            (setq-local agent-recall-transcript-mode t)
+            (when (eq kind 'dedicated)
+              (set-window-dedicated-p (selected-window) t))
+            (let ((windows (window-list))
+                  (edges (mapcar #'window-edges (window-list)))
+                  (dedicated (window-dedicated-p)))
+              (agent-recall-quit-transcript)
+              (should (equal windows (window-list)))
+              (should (equal edges (mapcar #'window-edges (window-list))))
+              (should (eq dedicated (window-dedicated-p)))
+              (should-not (memq (window-buffer) (list current older))))))
+      (mapc #'kill-buffer (list normal older current)))))
 
 (provide 'test-picker-navigation)
 ;;; test-picker-navigation.el ends here

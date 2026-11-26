@@ -8,7 +8,7 @@ Search, browse, and resume [agent-shell](https://github.com/xenodium/agent-shell
 
 ## agent-recall
 
-[agent-shell](https://github.com/xenodium/agent-shell) automatically saves full conversation transcripts as Markdown or Org-mode files in `.agent-shell/transcripts/` within your projects (or in a separate directory via `agent-shell-org-transcript`). Over time these accumulate into a rich knowledge base of AI interactions, but there's no built-in way to search across them or resume past conversations.
+[agent-shell](https://github.com/xenodium/agent-shell) automatically saves full conversation transcripts as Markdown or Org-mode files in `.agent-shell/transcripts/` within your projects (or in a separate directory via `agent-shell-org-transcript`). It provides native session listing and resuming. Agent Recall adds cross-project archive search and resume directly from saved transcripts.
 
 agent-recall maintains a persistent index of all transcripts, provides fast full-text search, and can resume past agent-shell sessions from any transcript.
 
@@ -146,6 +146,16 @@ Choose how search results are displayed. The default `grep` backend works everyw
 (setq agent-recall-search-function 'consult-ripgrep)
 ```
 
+Deadgrep searches follow the index's symlinks and retain the selected scope
+when restarted. Transcript searches exclude summary sidecars; summary searches
+include only sidecars. Starting another Recall search from a results buffer
+uses the newly requested scope. Recall controls symlink following and file
+globs; custom Deadgrep globs cannot override that scope. Other original
+Deadgrep options are preserved. Use `agent-recall-file-patterns` to choose
+which transcript extensions to search.
+Missing indexed directories are skipped when rebuilding the search links;
+their saved index metadata is retained if they become available again.
+
 #### Session tracking
 
 To automatically embed session IDs in new transcripts (enabling instant resume):
@@ -214,9 +224,9 @@ a title keep the usual project and timestamp display.
 
 `M-x agent-recall-search-live` opens a live-filtering search. It auto-selects the best available backend (`counsel-rg` or `consult-ripgrep`); falls back to a one-shot search if neither is installed.
 
-`M-x agent-recall-consult-search` provides a richer Consult interface when `consult` and `ripgrep` are installed. It groups matches by transcript and shows candidates in `[project] [match-count] date first-match` format, then jumps to the first match in the selected transcript. With Vertico's `vertico-suspend` extension available, `RET` visits a result without closing the search; `b` returns to the exact query, result, and matched line.
+`M-x agent-recall-consult-search` provides a richer Consult interface when `consult` and `ripgrep` are installed. It groups matches by transcript and shows candidates in `[project] [match-count] date first-match` format, then jumps to the first match in the selected transcript. With Vertico's `vertico-suspend` extension available, `RET` visits a result without closing the search; `M-x agent-recall-browse-from-transcript` returns to the exact query, result, and matched line.
 
-Transcripts visited from Agent Recall's grep and deadgrep result buffers also remember their exact result buffer and point; press `b` to return there.
+Transcripts visited from Agent Recall's grep and deadgrep result buffers also remember their exact result buffer and point; run `M-x agent-recall-browse-from-transcript` to return there.
 
 ### Browsing transcripts
 
@@ -236,9 +246,9 @@ When Consult, Vertico, and `vertico-suspend` are available, Browse preserves the
 | `M-RET` | Accept normally, close the picker, and keep the transcript open |
 | `C-g` | Abort the picker and restore the pre-picker window state |
 
-Press `b` in the visited transcript to return to the same input, candidate order, selected item, viewport, and preview. The candidate list is a snapshot: edits do not reorder it, and newly created transcripts appear the next time Browse is opened. Press `q` to close the transcript and abort its suspended picker cleanly.
+Run `M-x agent-recall-browse-from-transcript` in the visited transcript to return to the same input, candidate order, selected item, viewport, and preview. The candidate list is a snapshot: edits do not reorder it, and newly created transcripts appear the next time Browse is opened. Run `M-x agent-recall-quit-transcript` to close the transcript and abort its suspended picker cleanly.
 
-If Consult, Vertico, `vertico-suspend`, or automatic transcript mode is unavailable, Browse retains its one-shot behavior and transcript `b` opens a fresh picker. If a recorded picker later becomes stale, `b` safely discards that link and falls back to a fresh Browse picker.
+If Consult, Vertico, `vertico-suspend`, or automatic transcript mode is unavailable, Browse retains its one-shot behavior and `M-x agent-recall-browse-from-transcript` opens a fresh picker. If a recorded picker later becomes stale, `M-x agent-recall-browse-from-transcript` safely discards that link and falls back to a fresh Browse picker.
 
 #### Embark integration
 
@@ -270,10 +280,10 @@ You can always toggle it manually with `M-x agent-recall-transcript-mode`, or en
 
 There are two ways to resume a past session:
 
-- Press `r` in transcript mode to resume that transcript's session
+- Run `M-x agent-recall-resume-current` in transcript mode to resume that transcript's session
 - `M-x agent-recall-resume` to pick from all resumable transcripts
 
-If the session is already running in an agent-shell buffer, `r` will switch to that buffer instead of starting a new one. Press `R` to force a fresh resume regardless.
+If the session is already running in an agent-shell buffer, `M-x agent-recall-resume-current` will switch to that buffer instead of starting a new one. Run `M-x agent-recall-force-resume-current` to force a fresh resume regardless.
 
 Requires agent-shell to be loaded.
 
@@ -285,7 +295,14 @@ existing OpenCode transcripts resumable after updating.
 
 When you resume a session, agent-recall defaults to appending new messages to the **original transcript file** rather than creating a new one. This keeps the full conversation history in a single file.
 
-agent-recall uses the transcript's `**Agent:**` header to resume with the same agent configuration when possible. If the header is missing, it falls back to your `agent-shell` preferred/default selection.
+agent-recall reads the original agent and working directory from YAML frontmatter,
+legacy Markdown headers, or Org properties. If the agent cannot be identified or
+matched to an installed configuration, it prompts you to select one.
+
+The original transcript is attached only after the resumed session ID matches
+the requested ID and any restored history has finished replaying. This keeps
+replayed messages from being appended to the archive a second time. If the
+agent falls back to a different session, that session keeps its own transcript.
 
 > **Note:** Transcripts created by older versions of agent-shell may have a shortened agent name in the header (e.g., `Claude` instead of `Claude Code`). These won't auto-match a config and will prompt you to select one manually.
 
@@ -357,31 +374,23 @@ Note: In my experience, Claude chats get offloaded, so there's a good chance tha
 
 ### Key bindings
 
-In `agent-recall-transcript-mode`:
+`agent-recall-transcript-mode` keeps its default bindings:
 
-| Key | Command |
-|-----|---------|
-| `r` | Resume session — switches to existing buffer if already running |
-| `R` | Force resume — always starts a new agent-shell buffer |
-| `c` | Open clean view (strip tool calls) |
-| `b` | Return to the exact picker/result origin, or open a fresh Browse picker |
-| `C-c C-n` | Jump to next user message |
-| `C-c C-p` | Jump to previous user message |
-| `q` | Close the transcript and abort any suspended picker |
+- `r` resumes, `R` forces resume, and `c` opens a clean view.
+- `b` returns to the picker, `s` catalogues the session, and `q` quits.
+- `C-c C-n` / `C-c C-p` navigate user messages.
+- In Evil normal state, `C-j` / `C-k`, `]]` / `[[`, and `gj` / `gk`
+  also navigate user messages.
 
-#### Evil
+Customize `agent-recall-transcript-mode-map` in your own configuration;
+Evil users can override its normal-state bindings with `evil-define-key*`.
+The header displays the active bindings, including your overrides. Unbound
+actions are shown as `M-x` commands. No `C-c r` prefix is installed.
 
-Evil users get additional bindings in normal state:
-
-| Key | Command |
-|-----|---------|
-| `]]` | Next user message |
-| `[[` | Previous user message |
-| `gj` | Next user message |
-| `gk` | Previous user message |
-| `C-j` | Next user message |
-| `C-k` | Previous user message |
-| `q` | Close the transcript and abort any suspended picker |
+`M-x agent-recall-quit-transcript` buries the transcript and aborts its
+suspended picker while preserving the current pane layout and any resumed
+conversation. Older transcripts in the pane history are skipped, so one
+quit leaves the Recall view. It does not stop the agent.
 
 ## Customizations
 
@@ -404,10 +413,32 @@ Evil users get additional bindings in normal state:
 | `agent-recall-claude-config-dir` | Claude CLI config directory for session matching |
 | `agent-recall-session-match-window` | Max seconds for timestamp matching (default: 120) |
 
+### Catalogue
+
+A catalogued session is one you kept on purpose: the existing transcript, flagged in the sidecar metadata store with an ISO timestamp, an optional note (why you kept it) and optional tags. Nothing is copied and nothing touches Emacs bookmarks. Uncataloguing drops the flag only, so the note and tags come back on a later re-save.
+
+- `agent-recall-catalogue` saves or edits. It resolves the session from a live agent-shell buffer, a transcript-mode buffer, or the highlighted candidate of a Browse picker, then prompts for the note and the tags (with completion over tags already in use). In transcript mode, run `M-x agent-recall-catalogue` or bind it in your configuration; on Browse candidates it is the embark action `k`.
+- `agent-recall-uncatalogue` removes the flag.
+- `agent-recall-catalogue-browse` lists catalogued sessions newest save first, with `#tags` on the row and the note as the annotation. A prefix argument narrows to one tag.
+- `agent-recall-browse` with a prefix argument shows catalogued sessions only.
+
+Programmatic API:
+
+```elisp
+(agent-recall-catalogue-put session-id :note "why" :tags '("syzygy" "resume"))
+(agent-recall-catalogue-remove session-id)     ; drops `catalogued' only
+(agent-recall-catalogue-get session-id)        ; alist or nil
+(agent-recall-catalogue-entries &optional tag) ; (session-id . entry), newest save first
+(agent-recall-catalogue-tags)                  ; every tag in use
+```
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `agent-recall-catalogue` | Keep this session on purpose, with a note and tags |
+| `agent-recall-uncatalogue` | Drop the catalogue flag (note and tags survive) |
+| `agent-recall-catalogue-browse` | Browse catalogued sessions, newest save first (`C-u`: by tag) |
 | `agent-recall-reindex` | Rebuild transcript index from filesystem |
 | `agent-recall-search` | Search all transcripts for a query |
 | `agent-recall-search-live` | Live-filtering search with auto backend selection |
@@ -437,10 +468,31 @@ The index is built by `agent-recall-reindex` (scans the filesystem) and grows au
 
 Session IDs are resolved in order:
 
-1. **Embedded header** — a `**Session ID:** UUID` line written natively by agent-shell, or `**Session:** UUID` / `#+PROPERTY: Session UUID` written by `agent-recall-track-sessions` or `agent-recall-backfill`
-2. **Retroactive matching** — hybrid approach: narrows candidates by comparing the transcript's `**Started:**` timestamp (markdown) or `#+DATE:` (org-mode) against Claude session data in `~/.claude/projects/` (within `agent-recall-session-match-window` seconds), then confirms by comparing the first user message in the transcript against the first message in the Claude JSONL file
+1. **Embedded header** — YAML frontmatter `session_id`, `**Session ID:** UUID` (older agent-shell), or `**Session:** UUID` / `#+PROPERTY: Session UUID` (written by `agent-recall-track-sessions` or `agent-recall-backfill`)
+2. **Retroactive matching** — hybrid approach: narrows candidates by comparing the transcript's `started` / `**Started:**` (markdown) or `#+DATE:` (org-mode) timestamp against Claude session data in `~/.claude/projects/` (within `agent-recall-session-match-window` seconds), then confirms by comparing the first user message in the transcript against the first message in the Claude JSONL file
 
 The main index is persisted to disk and loads automatically. Retroactive matching results are cached in memory to avoid re-running the expensive JSONL comparison on every access.
+
+### Transcript metadata compatibility
+
+Native YAML metadata takes precedence over duplicate legacy fields. Existing
+Markdown and Org transcripts remain supported. Run `M-x agent-recall-reindex`
+after updating to refresh cached entries that were indexed before YAML support.
+
+Titles are read from either YAML `title:` or a Markdown `**Title:**` field before
+the conversation body. Updating an existing YAML title preserves that format;
+new titles use a Markdown field below the YAML block. Session tracking preserves
+native `session_id` values without inserting a duplicate. Older Recall headers
+above YAML are moved below it when metadata is next written. Unknown YAML fields
+and conversation text are preserved; no bulk migration is required.
+The reader targets agent-shell's flat metadata format. Hand-edited multiline
+YAML titles are not supported; attempts to update them leave the file unchanged
+and report an error.
+
+If resume still fails, check that the selected agent retains that session.
+Transcript metadata identifies a session but cannot recreate an expired or
+deleted agent session. Personal labels, catalogue notes, and preferences remain
+in Recall's separate sidecar store.
 
 ### Search directory
 

@@ -300,5 +300,77 @@
       (unless was-vertico-mode (vertico-mode -1))
       (delete-directory root t))))
 
+(ert-deftest test-picker-real-quit-keeps-layout-after-resume ()
+  "Quit a real suspended picker without moving a resumed chat's pane."
+  (skip-unless (and (not noninteractive)
+                    (require 'consult nil t)
+                    (require 'vertico nil t)
+                    (require 'vertico-suspend nil t)
+                    (require 'agent-recall-consult nil t)))
+  (let* ((file (make-temp-file "recall-quit-" nil ".md" "# Transcript\n"))
+         (origin (generate-new-buffer " *recall-quit-origin*"))
+         (chat (generate-new-buffer " *recall-quit-resumed*"))
+         (agent-recall-browse-preview t)
+         (agent-recall-auto-transcript-mode t)
+         (old-f12 (lookup-key global-map [f12]))
+         (old-f11 (lookup-key global-map [f11]))
+         (was-vertico (bound-and-true-p vertico-mode))
+         expected chat-window caught-quit)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer origin)
+          (vertico-mode 1)
+          (global-set-key [f12]
+                          (lambda ()
+                            (interactive)
+                            (vertico--exhibit)
+                            (agent-recall-consult--visit)
+                            (setq unread-command-events '(f11))))
+          (global-set-key
+           [f11]
+           (lambda ()
+             (interactive)
+             (sit-for 0.1)
+             (let* ((session (car agent-recall--navigation-sessions))
+                    (transcript (agent-recall--navigation-session-transcript-buffer
+                                 session))
+                    (transcript-window (get-buffer-window transcript)))
+               (unless transcript-window (ert-fail "Transcript did not open"))
+               (select-window transcript-window)
+               (setq-local agent-recall--transcript-session-id "test-session")
+               ;; No provider process: resume an already-live test chat through
+               ;; the real resume command and display path.
+               (let ((display-buffer-alist nil)
+                     (display-buffer-overriding-action
+                      '(display-buffer-pop-up-window)))
+                 (cl-letf (((symbol-function 'agent-recall--find-session-buffer)
+                            (lambda (_) chat)))
+                   (agent-recall-resume-current)))
+               (setq chat-window (get-buffer-window chat))
+               (select-window transcript-window)
+               (setq expected (mapcar #'window-edges (window-list nil 'nomini)))
+               (agent-recall-quit-transcript))))
+          (setq unread-command-events '(f12))
+          (condition-case nil
+              (with-timeout (5 (ert-fail "Timed out quitting suspended picker"))
+                (agent-recall-consult--browse-read
+                 (list (agent-recall--make-candidate "one" file nil 'browse))
+                 #'ignore))
+            (quit (setq caught-quit t)))
+          (should caught-quit)
+          (should-not (active-minibuffer-window))
+          (should-not agent-recall--navigation-sessions)
+          (should (equal expected (mapcar #'window-edges (window-list nil 'nomini))))
+          (should (eq (window-buffer chat-window) chat))
+          (should-not (get-buffer-window (get-file-buffer file))))
+      (define-key global-map [f12] old-f12)
+      (define-key global-map [f11] old-f11)
+      (when-let ((buffer (get-file-buffer file))) (kill-buffer buffer))
+      (kill-buffer origin)
+      (kill-buffer chat)
+      (delete-file file)
+      (unless was-vertico (vertico-mode -1)))))
+
 (provide 'test-picker-integration)
 ;;; test-picker-integration.el ends here

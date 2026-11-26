@@ -99,6 +99,27 @@ STATE should be an alist matching the shape of `agent-shell--state'."
 ;; Header line tests
 ;; ---------------------------------------------------------------------------
 
+(ert-deftest test-header-line-follows-active-bindings ()
+  "Show personal bindings when active and complete prefix keys otherwise."
+  (with-temp-buffer
+    (let ((map (make-sparse-keymap)))
+      (use-local-map map)
+      (define-key map (kbd "C-c r b") #'agent-recall-browse-from-transcript)
+      (dolist (binding '(("r" . agent-recall-resume-current)
+                         ("u" . agent-recall-browse-from-transcript)
+                         ("a" . agent-recall-catalogue)
+                         ("q" . agent-recall-quit-transcript)
+                         ("C-j" . agent-recall-next-user-message)
+                         ("C-k" . agent-recall-prev-user-message)))
+        (define-key map (kbd (car binding)) (cdr binding)))
+      (let ((header (substring-no-properties (agent-recall--header-line test-session-id))))
+        (should (string-match-p "u Back" header))
+        (should (string-match-p "a Save" header))
+        (should (string-match-p "C-j/C-k Navigate" header))
+        (should-not (string-match-p "then:" header)))
+      (define-key map (kbd "u") nil)
+      (should (string-match-p "C-c r b Back" (agent-recall--header-line nil))))))
+
 (ert-deftest test-header-line-no-session-id ()
   "Header should have no resume entries when session-id is nil."
   (let ((header (agent-recall--header-line nil)))

@@ -36,9 +36,10 @@
   (should (eq 'gemini (agent-recall--provider-for-name "gemini-2.5-pro"))))
 
 (ert-deftest test-provider-for-name-opencode ()
-  "OpenCode names map to `opencode'."
+  "OpenCode maps to `opencode', even when the name also carries a model id."
   (should (eq 'opencode (agent-recall--provider-for-name "OpenCode")))
-  (should (eq 'opencode (agent-recall--provider-for-name "opencode-go"))))
+  (should (eq 'opencode (agent-recall--provider-for-name "opencode-go")))
+  (should (eq 'opencode (agent-recall--provider-for-name "opencode openai/gpt-5.4"))))
 
 (ert-deftest test-provider-for-name-unknown-and-nil ()
   "Unknown names and non-strings return nil."
