@@ -2848,22 +2848,39 @@ not among its values."
                                  effort))))))))))))
 
 (defun agent-recall--continue-transcript-on-resume (shell-buffer session-id file)
-  "Attach FILE only after SHELL-BUFFER has resumed SESSION-ID.
+  "Attach FILE after SHELL-BUFFER has resumed SESSION-ID and replayed history.
 A failed resume may create a different session; keep its own transcript."
   (let (token)
-    (setq token
-          (agent-shell-subscribe-to
-           :shell-buffer shell-buffer :event 'init-session
-           :on-event
-           (lambda (_event)
-             (when token
-               (agent-shell-unsubscribe :subscription token)
-               (setq token nil))
-             (when (buffer-live-p shell-buffer)
-               (with-current-buffer shell-buffer
-                 (when (equal session-id
-                              (map-nested-elt agent-shell--state '(:session :id)))
-                   (setq-local agent-shell--transcript-file file)))))))))
+    (cl-labels
+        ((unsubscribe ()
+           (when token
+             (agent-shell-unsubscribe :subscription token)
+             (setq token nil)))
+         (attach (_event)
+           (unsubscribe)
+           (when (buffer-live-p shell-buffer)
+             (with-current-buffer shell-buffer
+               (when (equal session-id
+                            (map-nested-elt agent-shell--state '(:session :id)))
+                 (setq-local agent-shell--transcript-file file)))))
+         (initialized (_event)
+           (unsubscribe)
+           (when (buffer-live-p shell-buffer)
+             (with-current-buffer shell-buffer
+               (when (equal session-id
+                            (map-nested-elt agent-shell--state '(:session :id)))
+                 ;; init-session precedes replay.  Empty history emits no
+                 ;; session-restored event, so only wait for nonempty turns.
+                 (if (seq-some #'identity
+                               (map-nested-elt agent-shell--state
+                                               '(:pending-restore :prompt-turns)))
+                     (setq token (agent-shell-subscribe-to
+                                  :shell-buffer shell-buffer
+                                  :event 'session-restored :on-event #'attach))
+                   (attach nil)))))))
+      (setq token (agent-shell-subscribe-to
+                   :shell-buffer shell-buffer :event 'init-session
+                   :on-event #'initialized)))))
 
 (defun agent-recall--start-resume (session-id &optional transcript-file)
   "Resume SESSION-ID using agent-shell, skipping shell picker.

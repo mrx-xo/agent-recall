@@ -184,4 +184,68 @@
                     :type 'user-error)
       (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string)))))))
 
+(ert-deftest recall-yaml-resume-keeps-replayed-history-out-of-archive ()
+  "Attaching at init-session must not duplicate the restored conversation."
+  (dolist (verbosity '(full first-last last))
+    (agent-recall-yaml-test--with-file ""
+      (let ((before (with-temp-buffer (insert-file-contents file) (buffer-string)))
+            (fresh (expand-file-name "fresh.md" root))
+            (agent-shell-persistent-prompt-enabled nil)
+            (agent-shell-session-restore-verbosity verbosity))
+        (with-temp-file fresh (insert "Fresh transcript\n"))
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode)
+          (setq-local agent-shell--state (agent-shell--make-state :buffer (current-buffer)))
+          (setq-local agent-shell--transcript-file fresh)
+          (map-put! agent-shell--state :agent-config '((:shell-prompt . "Test> ")))
+          (map-put! (map-elt agent-shell--state :session) :id sid)
+          (map-put! agent-shell--state :supports-session-load t)
+          (map-put! agent-shell--state :pending-restore (agent-shell--make-pending-restore))
+          (agent-shell--append-restore-notification
+           agent-shell--state
+           '((method . "session/update")
+             (params . ((update . ((sessionUpdate . "user_message_chunk")
+                                  (content . ((type . "text") (text . "OLD PROMPT")))))))))
+          (agent-recall--continue-transcript-on-resume (current-buffer) sid file)
+          ;; Keep real event ordering, replay handlers and file writes.  Only
+          ;; suppress UI bootstrapping and external system-sleep management.
+          (cl-letf (((symbol-function 'agent-shell--update-bootstrapping-fragment) #'ignore)
+                    ((symbol-function 'agent-shell--update-header-and-mode-line) #'ignore)
+                    ((symbol-function 'agent-shell--display-session-options) #'ignore)
+                    ((symbol-function 'agent-shell--sync-system-sleep) #'ignore)
+                    ((symbol-function 'agent-shell--create-bootstrapping-placeholders) #'ignore)
+                    ((symbol-function 'agent-shell--update-text) #'ignore)
+                    ((symbol-function 'shell-maker-insert-end-of-prompt-marker) #'ignore)
+                    ((symbol-function 'agent-shell--ensure-transcript-file)
+                     (lambda () agent-shell--transcript-file))
+                    ((symbol-function 'agent-shell--report-restore-error)
+                     (lambda (&rest args) (ert-fail args))))
+            (agent-shell--finalize-session-init
+             :on-session-init (lambda ()
+                                (agent-shell--render-pending-restore agent-shell--state))))
+          (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+          (should (equal file agent-shell--transcript-file))
+          (should (with-temp-buffer
+                    (insert-file-contents fresh)
+                    (search-forward "OLD PROMPT" nil t)))
+          (agent-shell--append-transcript :text "NEW PROMPT\n" :file-path agent-shell--transcript-file)
+          (should (equal (concat before "NEW PROMPT\n")
+                         (with-temp-buffer (insert-file-contents file) (buffer-string)))))))))
+
+(ert-deftest recall-yaml-empty-restore-still-attaches-archive ()
+  "An empty replay does not emit session-restored, but must still attach."
+  (with-temp-buffer
+    (setq major-mode 'agent-shell-mode)
+    (setq-local agent-shell--state (agent-shell--make-state :buffer (current-buffer)))
+    (setq-local agent-shell--transcript-file "fresh.md")
+    (map-put! (map-elt agent-shell--state :session) :id "ses_Empty")
+    (map-put! agent-shell--state :pending-restore (agent-shell--make-pending-restore))
+    (agent-recall--continue-transcript-on-resume (current-buffer) "ses_Empty" "archive.md")
+    (cl-letf (((symbol-function 'agent-shell--update-bootstrapping-fragment) #'ignore)
+              ((symbol-function 'agent-shell--update-header-and-mode-line) #'ignore)
+              ((symbol-function 'agent-shell--display-session-options) #'ignore))
+      (agent-shell--finalize-session-init
+       :on-session-init (lambda () (agent-shell--render-pending-restore agent-shell--state))))
+    (should (equal "archive.md" agent-shell--transcript-file))))
+
 (provide 'test-yaml-metadata)

@@ -300,8 +300,9 @@ legacy Markdown headers, or Org properties. If the agent cannot be identified or
 matched to an installed configuration, it prompts you to select one.
 
 The original transcript is attached only after the resumed session ID matches
-the requested ID. If the agent falls back to a different session, that session
-keeps its own transcript.
+the requested ID and any restored history has finished replaying. This keeps
+replayed messages from being appended to the archive a second time. If the
+agent falls back to a different session, that session keeps its own transcript.
 
 > **Note:** Transcripts created by older versions of agent-shell may have a shortened agent name in the header (e.g., `Claude` instead of `Claude Code`). These won't auto-match a config and will prompt you to select one manually.
 
