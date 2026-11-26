@@ -28,17 +28,19 @@ The transcript and any sidecar written beside it are removed after."
   (let ((agent-recall--search-scope 'transcripts)
         (agent-recall-file-patterns '("*.md" "*.org")))
     (let ((globs (agent-recall--scoped-globs)))
-      (should (member "*.md" globs))
-      (should (member "*.org" globs))
-      (should (member "!*.summary.*" globs))
-      (should-not (member "*.summary.*" globs)))))
+      (should (member "--glob=*.md" globs))
+      (should (member "--glob=*.org" globs))
+      (should (member "--glob=!*.summary.*" globs))
+      (should-not (member "--glob=*.summary.*" globs))
+      ;; Single tokens only: deadgrep reverses extra arguments.
+      (should-not (member "--glob" globs)))))
 
 (ert-deftest agent-recall-scoped-globs-targets-only-summaries ()
   "In `summaries' scope nothing but the sidecars is searched."
   (let ((agent-recall--search-scope 'summaries)
         (agent-recall-file-patterns '("*.md" "*.org")))
     (should (equal (agent-recall--scoped-globs)
-                   '("--glob" "*.summary.*")))))
+                   '("--glob=*.summary.*")))))
 
 (ert-deftest agent-recall-grep-includes-follow-the-scope ()
   "The grep backend gets --exclude for transcripts and --include for summaries."

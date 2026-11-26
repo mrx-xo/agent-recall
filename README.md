@@ -146,6 +146,16 @@ Choose how search results are displayed. The default `grep` backend works everyw
 (setq agent-recall-search-function 'consult-ripgrep)
 ```
 
+Deadgrep searches follow the index's symlinks and retain the selected scope
+when restarted. Transcript searches exclude summary sidecars; summary searches
+include only sidecars. Starting another Recall search from a results buffer
+uses the newly requested scope. Recall controls symlink following and file
+globs; custom Deadgrep globs cannot override that scope. Other original
+Deadgrep options are preserved. Use `agent-recall-file-patterns` to choose
+which transcript extensions to search.
+Missing indexed directories are skipped when rebuilding the search links;
+their saved index metadata is retained if they become available again.
+
 #### Session tracking
 
 To automatically embed session IDs in new transcripts (enabling instant resume):

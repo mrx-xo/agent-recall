@@ -83,6 +83,7 @@
 (require 'subr-x)
 
 (defvar deadgrep-extra-arguments)
+(defvar deadgrep-display-buffer-function)
 (defvar counsel-rg-base-command)
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional keymaps))
@@ -1408,12 +1409,16 @@ through `agent-recall--scoped-globs'.")
 (defun agent-recall--scoped-globs ()
   "Return ripgrep --glob arguments as a list, for `agent-recall--search-scope'.
 Summaries are sidecars that also match `agent-recall-file-patterns', so a
-transcript search which does not exclude them reports every hit twice."
+transcript search which does not exclude them reports every hit twice.
+
+Each element is a single \"--glob=PATTERN\" token so backends cannot
+separate a flag from its pattern.  Order still matters: ripgrep gives
+later globs precedence, so the summary exclusion follows the includes."
   (if (eq agent-recall--search-scope 'summaries)
-      (list "--glob" agent-recall--summary-glob)
-    (append (cl-mapcan (lambda (pat) (list "--glob" pat))
-                       (agent-recall--file-patterns))
-            (list "--glob" (concat "!" agent-recall--summary-glob)))))
+      (list (concat "--glob=" agent-recall--summary-glob))
+    (append (mapcar (lambda (pat) (concat "--glob=" pat))
+                    (agent-recall--file-patterns))
+            (list (concat "--glob=!" agent-recall--summary-glob)))))
 
 (defun agent-recall--file-patterns-as-includes ()
   "Return grep --include/--exclude arguments for the current search scope."
@@ -1440,9 +1445,10 @@ backslash in the argv (e.g. \"\\\\*.md\"), and ripgrep would match nothing."
 Returns the path.  Each symlink is named PROJECT-COUNT to avoid
 collisions when multiple projects share a name.
 The directory lives alongside `agent-recall-index-file'.
+Skip missing transcript directories without removing their index metadata.
 Keep the directory and regular files intact; replace only stale symlinks."
   (let* ((base (expand-file-name "search" (file-name-directory agent-recall-index-file)))
-         (dirs (agent-recall--index-dirs))
+         (dirs (seq-filter #'file-directory-p (agent-recall--index-dirs)))
          (wanted (make-hash-table :test 'equal)))
     (when (file-symlink-p base)
       (error "Search directory must not be a symbolic link: %s" base))
@@ -1576,19 +1582,43 @@ Falls back to standard grep, available on all systems."
         (with-current-buffer buf
           (agent-recall--mark-search-buffer 'grep))))))
 
+(defvar-local agent-recall--deadgrep-user-arguments nil
+  "User arguments before Recall added its scope to this results buffer.
+New searches inherit these instead of accumulating previous scope filters.")
+
 (defun agent-recall--search-via-deadgrep (query _dirs)
   "Search transcripts for QUERY using `deadgrep'.
 DIRS are unused; deadgrep searches the symlink directory instead."
-  (unless (fboundp 'deadgrep)
+  (unless (require 'deadgrep nil t)
     (user-error "Deadgrep is not installed.  Install it or set `agent-recall-search-function' to `grep'"))
-  (let ((dir (agent-recall--ensure-symlink-dir))
-        (deadgrep-extra-arguments (append (bound-and-true-p deadgrep-extra-arguments)
-                                          '("--follow")
-                                          (agent-recall--scoped-globs))))
-    (deadgrep query dir)
-    (when agent-recall-auto-transcript-mode
-      (agent-recall--install-transcript-hook)
-      (agent-recall--mark-search-buffer 'deadgrep))))
+  (let* ((dir (agent-recall--ensure-symlink-dir))
+         (user-arguments
+          (copy-sequence
+           (if (local-variable-p 'agent-recall--deadgrep-user-arguments)
+               agent-recall--deadgrep-user-arguments
+             deadgrep-extra-arguments)))
+         ;; Deadgrep reverses this list.  Put Recall's scope after user
+         ;; options in rg's argv.  Reset earlier glob matches, allow directory
+         ;; traversal, then include only the requested files.  Without the
+         ;; reset, a user include can broaden even a summaries-only search.
+         (extra (append (reverse (append '("--glob=!*" "--glob=*/")
+                                         (agent-recall--scoped-globs)))
+                        '("--follow")
+                        user-arguments))
+         (display-function deadgrep-display-buffer-function)
+         (deadgrep-display-buffer-function
+          (lambda (buffer)
+            ;; Deadgrep calls this after initializing new or reused buffers,
+            ;; before starting rg.  A dynamic binding in the origin buffer
+            ;; cannot reliably supply options after that buffer switch.
+            (with-current-buffer buffer
+              (setq-local deadgrep-extra-arguments extra)
+              (setq-local agent-recall--deadgrep-user-arguments user-arguments)
+              (when agent-recall-auto-transcript-mode
+                (agent-recall--install-transcript-hook)
+                (agent-recall--mark-search-buffer 'deadgrep)))
+            (funcall display-function buffer))))
+    (deadgrep query dir)))
 
 (defun agent-recall--search-via-counsel-rg (query _dirs)
   "Search transcripts for QUERY using `counsel-rg'.
