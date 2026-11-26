@@ -524,6 +524,12 @@ M-x agent-recall-summarize
 
 This launches an agent-shell session and sends each un-summarized transcript through the LLM. Summary files are saved as `TIMESTAMP.summary.md` next to the original transcripts. Transcripts that already have summaries are skipped.
 
+Embedded NUL characters (for example, from pasted `rg --null` output) are
+removed from the outgoing summary text without modifying the transcript file.
+Local prompt-encoding or send errors appear immediately as `send failed` in the
+progress buffer; the batch continues with the next transcript. Failed items
+remain eligible for a later run because no summary file is written for them.
+
 The skill automatically searches summaries first and falls back to raw transcripts when no summaries are available.
 
 ### Programmatic API

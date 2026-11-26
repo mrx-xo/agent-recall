@@ -3682,9 +3682,11 @@ Given `TIMESTAMP.md', returns `TIMESTAMP.summary.md' in the same directory."
 (defun agent-recall--clean-transcript-string (file)
   "Return transcript FILE content without tool-call sections.
 Extracts only the header plus User and Agent sections, removing
-tool calls and agent thought blocks."
+tool calls and agent thought blocks.  Decode text normally despite NUL
+bytes, and remove NUL characters from the returned text, not FILE."
   (with-temp-buffer
-    (insert-file-contents file)
+    (let ((inhibit-null-byte-detection t))
+      (insert-file-contents file))
     (let ((source (current-buffer))
           (result (generate-new-buffer " *recall-clean*")))
       (unwind-protect
@@ -3714,7 +3716,7 @@ tool calls and agent thought blocks."
                       (insert text))
                     (goto-char section-end)))))
             (with-current-buffer result
-              (buffer-string)))
+              (string-replace "\0" "" (buffer-string))))
         (kill-buffer result)))))
 
 (defvar agent-recall--summarize-prompt
@@ -3962,65 +3964,88 @@ PROGRESS-BUFFER shows status.  TOTAL and DONE track progress."
                    (agent-recall--summarize-next
                     rest work-buffer progress-buffer total (1+ done)))))))
       (agent-recall--summarize-start-spinner work-buffer)
-      (acp-send-request
-       :client (buffer-local-value 'agent-recall--summarize-client work-buffer)
-       :sync nil
-       :request (acp-make-session-prompt-request
-                 :session-id (buffer-local-value
-                              'agent-recall--summarize-session-id work-buffer)
-                 :prompt (vector (list (cons 'type "text")
-                                       (cons 'text prompt))))
-       :on-success
-       (lambda (_result)
-         ;; Ignore if this item was already timed out
-         (when (and (buffer-live-p work-buffer)
-                    (= gen (buffer-local-value
-                            'agent-recall--summarize-generation work-buffer)))
-           (when (buffer-live-p work-buffer)
-             (with-current-buffer work-buffer
-               (when agent-recall--summarize-timeout-timer
-                 (cancel-timer agent-recall--summarize-timeout-timer)
-                 (setq agent-recall--summarize-timeout-timer nil))))
-           (condition-case err
-               (let* ((text (and (buffer-live-p work-buffer)
-                                 (with-current-buffer work-buffer
-                                   (string-trim
-                                    agent-recall--summarize-response-text))))
-                      (nchars (if text (length text) 0))
-                      (summary-file (agent-recall--summary-file file)))
-                 (if (and text (not (string-empty-p text)))
-                     (progn
-                       (with-temp-file summary-file
-                         (insert text "\n"))
+      (condition-case err
+          (acp-send-request
+           :client (buffer-local-value 'agent-recall--summarize-client work-buffer)
+           :sync nil
+           :request (acp-make-session-prompt-request
+                     :session-id (buffer-local-value
+                                  'agent-recall--summarize-session-id work-buffer)
+                     :prompt (vector (list (cons 'type "text")
+                                           (cons 'text prompt))))
+           :on-success
+           (lambda (_result)
+             ;; Ignore if this item was already timed out
+             (when (and (buffer-live-p work-buffer)
+                        (= gen (buffer-local-value
+                                'agent-recall--summarize-generation work-buffer)))
+               (when (buffer-live-p work-buffer)
+                 (with-current-buffer work-buffer
+                   (when agent-recall--summarize-timeout-timer
+                     (cancel-timer agent-recall--summarize-timeout-timer)
+                     (setq agent-recall--summarize-timeout-timer nil))))
+               (condition-case err
+                   (let* ((text (and (buffer-live-p work-buffer)
+                                     (with-current-buffer work-buffer
+                                       (string-trim
+                                        agent-recall--summarize-response-text))))
+                          (nchars (if text (length text) 0))
+                          (summary-file (agent-recall--summary-file file)))
+                     (if (and text (not (string-empty-p text)))
+                         (progn
+                           (with-temp-file summary-file
+                             (insert text "\n"))
+                           (agent-recall--summarize-finalize-line
+                            work-buffer progress-buffer
+                            (format " ✓ %d chars → %s\n"
+                                    nchars (file-name-nondirectory summary-file))))
                        (agent-recall--summarize-finalize-line
-                        work-buffer progress-buffer
-                        (format " ✓ %d chars → %s\n"
-                                nchars (file-name-nondirectory summary-file))))
-                   (agent-recall--summarize-finalize-line
-                    work-buffer progress-buffer " ✗ empty output\n")))
-             (error
-              (agent-recall--summarize-finalize-line
-               work-buffer progress-buffer
-               (format " ✗ %s\n" (error-message-string err)))))
-           ;; Continue to next file
-           (agent-recall--summarize-next
-            rest work-buffer progress-buffer total (1+ done))))
-       :on-failure
-       (lambda (err)
-         ;; Ignore if this item was already timed out
+                        work-buffer progress-buffer " ✗ empty output\n")))
+                 (error
+                  (agent-recall--summarize-finalize-line
+                   work-buffer progress-buffer
+                   (format " ✗ %s\n" (error-message-string err)))))
+               ;; Continue to next file
+               (agent-recall--summarize-next
+                rest work-buffer progress-buffer total (1+ done))))
+           :on-failure
+           (lambda (err)
+             ;; Ignore if this item was already timed out
+             (when (and (buffer-live-p work-buffer)
+                        (= gen (buffer-local-value
+                                'agent-recall--summarize-generation work-buffer)))
+               (when (buffer-live-p work-buffer)
+                 (with-current-buffer work-buffer
+                   (when agent-recall--summarize-timeout-timer
+                     (cancel-timer agent-recall--summarize-timeout-timer)
+                     (setq agent-recall--summarize-timeout-timer nil))))
+               (agent-recall--summarize-finalize-line
+                work-buffer progress-buffer
+                (format " ✗ %S\n" err))
+               (agent-recall--summarize-next
+                rest work-buffer progress-buffer total (1+ done)))))
+        (error
          (when (and (buffer-live-p work-buffer)
                     (= gen (buffer-local-value
                             'agent-recall--summarize-generation work-buffer)))
-           (when (buffer-live-p work-buffer)
-             (with-current-buffer work-buffer
-               (when agent-recall--summarize-timeout-timer
-                 (cancel-timer agent-recall--summarize-timeout-timer)
-                 (setq agent-recall--summarize-timeout-timer nil))))
+           (with-current-buffer work-buffer
+             ;; Invalidate callbacks for any request ACP registered before
+             ;; serialization or transport failed.
+             (cl-incf agent-recall--summarize-generation)
+             (when agent-recall--summarize-timeout-timer
+               (cancel-timer agent-recall--summarize-timeout-timer)
+               (setq agent-recall--summarize-timeout-timer nil)))
            (agent-recall--summarize-finalize-line
             work-buffer progress-buffer
-            (format " ✗ %S\n" err))
-           (agent-recall--summarize-next
-            rest work-buffer progress-buffer total (1+ done))))))))
+            (format " ✗ send failed: %s\n" (error-message-string err)))
+           ;; Yield between local failures instead of recursing through a
+           ;; whole batch when the agent cannot accept any requests.
+           (run-at-time
+            0 nil
+            (lambda ()
+              (when (buffer-live-p work-buffer)
+                (agent-recall--summarize-next
+                 rest work-buffer progress-buffer total (1+ done)))))))))))
 
 (defun agent-recall--indexed-projects ()
   "Return the sorted list of distinct project names in the index."
