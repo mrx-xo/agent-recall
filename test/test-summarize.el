@@ -161,6 +161,7 @@ log it and keep the session alive; only request failures tear down."
   (let* ((file (make-temp-file "recall-json-error-" nil ".md" "## User (now)\nText\n"))
          (work (generate-new-buffer " *recall-json-work*"))
          (progress (generate-new-buffer " *recall-json-progress*"))
+         (transport-called nil)
          (agent-recall--index (make-hash-table :test 'equal))
          (client (acp-make-client
                   :command "unused-test-agent"
@@ -178,10 +179,15 @@ log it and keep the session alive; only request failures tear down."
                   agent-recall--summarize-session-id "test-session"))
           (cl-letf (((symbol-function 'acp--client-started-p) (lambda (_) t))
                     ((symbol-function 'process-send-string)
-                     (lambda (&rest _) (ert-fail "Unencodable prompt reached transport"))))
+                     (lambda (&rest _)
+                       (setq transport-called t)
+                       (ert-fail "Unencodable prompt reached transport"))))
             (agent-recall--summarize-next (list file) work progress 1 0))
-          (should (with-current-buffer progress
-                    (string-match-p "send failed: .*json-value-p" (buffer-string))))
+          ;; Emacs 29 and newer serializers signal different error types.
+          ;; Require a visible error and no transport, not a particular name.
+          (let ((status (with-current-buffer progress (buffer-string))))
+            (should (string-match-p "send failed: [^\n]+" status)))
+          (should-not transport-called)
           (should-not (buffer-local-value 'agent-recall--summarize-timeout-timer work))
           (should-not (buffer-local-value 'agent-recall--summarize-spinner-timer work))
           (let ((deadline (+ (float-time) 2)))
