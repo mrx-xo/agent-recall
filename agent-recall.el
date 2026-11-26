@@ -32,8 +32,8 @@
 ;; `.agent-shell/transcripts/' directories within your projects, or in
 ;; directories configured via `agent-recall-extra-transcript-dirs'.  Over
 ;; time these accumulate into a rich knowledge base of AI interactions,
-;; but there's no built-in way to search across them or resume past
-;; conversations.
+;; with native session listing and resuming supplied by agent-shell.
+;; Recall adds cross-project archive search and transcript-based resume.
 ;;
 ;; agent-recall maintains a persistent index of all transcripts,
 ;; provides fast full-text search powered by ripgrep, and can resume
@@ -86,7 +86,7 @@
 (defvar deadgrep-display-buffer-function)
 (defvar counsel-rg-base-command)
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
-(declare-function evil-normalize-keymaps "evil-core" (&optional keymaps))
+(declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function deadgrep "deadgrep" (search-term &optional directory))
 (declare-function counsel-rg "counsel" (&optional initial-input initial-directory extra-rg-args rg-prompt))
 (defvar consult-ripgrep-args)
@@ -613,7 +613,7 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
        (not (eq (agent-recall--navigation-session-state session) 'closed))
        (pcase (agent-recall--navigation-session-backend session)
          ('suspended
-          (when-let ((valid (agent-recall--navigation-session-valid-function
+          (when-let* ((valid (agent-recall--navigation-session-valid-function
                              session)))
             (condition-case nil
                 (funcall valid session)
@@ -628,7 +628,7 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
 
 (defun agent-recall--navigation-detach (session)
   "Detach SESSION from its transcript buffer."
-  (when-let ((buffer (agent-recall--navigation-session-transcript-buffer session)))
+  (when-let* ((buffer (agent-recall--navigation-session-transcript-buffer session)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq agent-recall--navigation-origins
@@ -651,12 +651,12 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
   "Remove all live references owned by navigation SESSION."
   (when (agent-recall--navigation-session-p session)
     (agent-recall--navigation-detach session)
-    (when-let ((minibuffer (agent-recall--navigation-session-minibuffer session)))
+    (when-let* ((minibuffer (agent-recall--navigation-session-minibuffer session)))
       (when (buffer-live-p minibuffer)
         (with-current-buffer minibuffer
           (when (eq agent-recall--picker-navigation-session session)
             (setq agent-recall--picker-navigation-session nil)))))
-    (when-let ((marker (agent-recall--navigation-session-origin-marker session)))
+    (when-let* ((marker (agent-recall--navigation-session-origin-marker session)))
       (set-marker marker nil))
     (setf (agent-recall--navigation-session-state session) 'closed)
     (setq agent-recall--navigation-sessions
@@ -694,7 +694,7 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
   "Abort SESSION and clean it up if its backend does not unwind."
   (agent-recall--navigation-detach session)
   (condition-case err
-      (if-let ((abort (agent-recall--navigation-session-abort-function session)))
+      (if-let* ((abort (agent-recall--navigation-session-abort-function session)))
           (unless (funcall abort session)
             (agent-recall--navigation-schedule-orphan-abort))
         (agent-recall--navigation-cleanup session))
@@ -705,7 +705,7 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
 (defun agent-recall--navigation-abort-orphan ()
   "Abort the newest suspended picker which has lost its transcript."
   (setq agent-recall--navigation-orphan-timer nil)
-  (when-let ((session
+  (when-let* ((session
               (seq-find
                (lambda (item)
                  (and (eq (agent-recall--navigation-session-backend item)
@@ -752,7 +752,7 @@ ORIGIN-BUFFER and ORIGIN-MARKER identify a persistent result location."
           (minibuffer (agent-recall--navigation-session-minibuffer session)))
       (when (or (and (windowp origin) (eq (window-frame origin) frame))
                 (and (buffer-live-p minibuffer)
-                     (when-let ((window (get-buffer-window minibuffer t)))
+                     (when-let* ((window (get-buffer-window minibuffer t)))
                        (eq (window-frame window) frame))))
         (if (eq (agent-recall--navigation-session-backend session) 'suspended)
             (run-at-time 0 nil #'agent-recall--navigation-request-abort session)
@@ -1021,9 +1021,9 @@ The entry is an alist with `catalogued', and `note' and `tags' when set."
               (stamp (alist-get 'catalogued metadata)))
     (delq nil
           (list (cons 'catalogued stamp)
-                (when-let ((note (alist-get 'note metadata)))
+                (when-let* ((note (alist-get 'note metadata)))
                   (cons 'note note))
-                (when-let ((tags (alist-get 'tags metadata)))
+                (when-let* ((tags (alist-get 'tags metadata)))
                   (cons 'tags tags))))))
 
 (defun agent-recall-catalogue-entries (&optional tag)
@@ -1057,7 +1057,7 @@ With TAG, keep only entries carrying that exact tag."
   "Return a propertized \"  LABEL\" display suffix for SESSION-ID.
 Returns an empty string when the session has no label, so callers
 can concat it unconditionally onto candidate strings."
-  (if-let ((label (agent-recall-session-label session-id)))
+  (if-let* ((label (agent-recall-session-label session-id)))
       (concat "  " (propertize label 'face 'agent-recall-label))
     ""))
 
@@ -1082,7 +1082,7 @@ Prefers the cached `:agent' from ENTRY, then the transcript's Agent
 header, then the saved model metadata."
   (or (agent-recall--provider-for-name (plist-get entry :agent))
       (agent-recall--provider-for-name (agent-recall--read-agent-name file))
-      (when-let ((sid (plist-get entry :session-id)))
+      (when-let* ((sid (plist-get entry :session-id)))
         (agent-recall--provider-for-name
          (agent-recall-metadata-get sid 'model)))))
 
@@ -1117,7 +1117,7 @@ real SVG logo on graphic displays, and a colored initial on text
 terminals."
   (if (not agent-recall-show-provider-icons)
       ""
-    (if-let ((provider (agent-recall--entry-provider file entry)))
+    (if-let* ((provider (agent-recall--entry-provider file entry)))
         (let ((help (capitalize (symbol-name provider)))
               (img (agent-recall--provider-image provider)))
           (if img
@@ -1171,7 +1171,7 @@ the buffer-local `agent-shell--state'."
   "Run `agent-recall-capture-functions' and persist the merged result.
 Intended to run in an agent-shell buffer.  Does nothing until the
 session ID is known."
-  (when-let ((session-id
+  (when-let* ((session-id
               (or (and (bound-and-true-p agent-shell--state)
                        (map-nested-elt agent-shell--state '(:session :id)))
                   agent-recall--pending-session-id)))
@@ -1547,9 +1547,9 @@ Keep the directory and regular files intact; replace only stale symlinks."
           (puthash project (1+ count) seen)
           (puthash (expand-file-name link-name base) dir wanted))))
     (dolist (file (directory-files base t directory-files-no-dot-files-regexp))
-      (when-let ((target (file-symlink-p file)))
+      (when-let* ((target (file-symlink-p file)))
         (unless (equal (directory-file-name (expand-file-name target base))
-                       (when-let ((dir (gethash file wanted)))
+                       (when-let* ((dir (gethash file wanted)))
                          (directory-file-name (expand-file-name dir))))
           (delete-file file))))
     (maphash
@@ -1639,7 +1639,7 @@ Only persistent grep and deadgrep result buffers establish this origin."
 
 (defun agent-recall--finish-pending-search-origin ()
   "Finish a persistent result command and consume its recorded origin."
-  (when-let ((origin agent-recall--pending-search-origin))
+  (when-let* ((origin agent-recall--pending-search-origin))
     (unwind-protect
         (agent-recall--attach-pending-search-origin origin)
       (agent-recall--clear-pending-search-origin
@@ -1657,7 +1657,7 @@ Falls back to standard grep, available on all systems."
     (grep cmd)
     (when agent-recall-auto-transcript-mode
       (agent-recall--install-transcript-hook)
-      (when-let ((buf (get-buffer "*grep*")))
+      (when-let* ((buf (get-buffer "*grep*")))
         (with-current-buffer buf
           (agent-recall--mark-search-buffer 'grep))))))
 
@@ -1871,7 +1871,7 @@ Use the canonical absolute path as a deterministic tie-breaker."
 
 (defun agent-recall--transcript-mtime (record)
   "Return the modification time for transcript RECORD."
-  (or (when-let ((attributes (file-attributes (nth 1 record))))
+  (or (when-let* ((attributes (file-attributes (nth 1 record))))
         (file-attribute-modification-time attributes))
       (seconds-to-time 0)))
 
@@ -2215,7 +2215,7 @@ transcript is no longer in the index are skipped."
   (agent-recall--index-ensure)
   (let ((by-session (make-hash-table :test 'equal)))
     (maphash (lambda (file entry)
-               (when-let ((session-id (plist-get entry :session-id)))
+               (when-let* ((session-id (plist-get entry :session-id)))
                  (when (file-exists-p file)
                    (let ((prev (gethash session-id by-session)))
                      ;; A resumed conversation writes a fresh transcript under
@@ -2248,7 +2248,7 @@ transcript is no longer in the index are skipped."
            (agent-recall-catalogue-entries tag)))))
 
 (defun agent-recall--catalogue-annotation-function (candidates)
-  "Return an annotation function showing each candidate's catalogue note.
+  "Return an annotation function showing catalogue notes from CANDIDATES.
 A note is the whole reason the session was kept, so it outranks the summary
 topic.  Without one the row still annotates, falling back the usual way."
   (lambda (candidate)
@@ -2618,7 +2618,7 @@ a summary is shown in the echo area."
         (read-only-mode 1)
         (setq-local header-line-format
                     '(:eval (agent-recall--header-line agent-recall--transcript-session-id)))
-        (when-let ((metadata (and session-id
+        (when-let* ((metadata (and session-id
                                   (agent-recall-metadata session-id))))
           (message "metadata detected — %s"
                    (agent-recall--metadata-summary metadata))))
@@ -2696,7 +2696,7 @@ Window placement for the non-viewport path is controlled by
         (file (buffer-file-name)))
     (unless session-id
       (user-error "This transcript has no resumable session ID"))
-    (if-let ((existing (agent-recall--find-session-buffer session-id)))
+    (if-let* ((existing (agent-recall--find-session-buffer session-id)))
         (progn
           (message "Switching to existing buffer: %s" (buffer-name existing))
           (agent-recall--display-buffer existing))
@@ -2753,7 +2753,7 @@ Supports both markdown and `org-mode' transcript formats."
   "Return the `agent-shell' config matching transcript FILE's Agent header.
 Checks the user's preferred config first, then falls back to the
 default `agent-shell-agent-configs' list."
-  (when-let ((agent-name (agent-recall--read-agent-name file)))
+  (when-let* ((agent-name (agent-recall--read-agent-name file)))
     (let ((preferred (and (fboundp 'agent-shell--resolve-preferred-config)
                           (agent-shell--resolve-preferred-config))))
       (or (and preferred
@@ -2785,7 +2785,7 @@ The overrides are closures that agent-shell calls during session
 init; each validates the saved id against what the live session
 actually offers and returns nil (skipping the step) when the id is
 no longer available, so a stale id can never stall initialization."
-  (when-let ((model (alist-get 'model metadata)))
+  (when-let* ((model (alist-get 'model metadata)))
     (setq config
           (append
            `((:default-model-id
@@ -2800,7 +2800,7 @@ no longer available, so a stale id can never stall initialization."
                               model)
                      nil))))
            config)))
-  (when-let ((mode (alist-get 'permission-mode metadata)))
+  (when-let* ((mode (alist-get 'permission-mode metadata)))
     (setq config
           (append
            `((:default-session-mode-id
@@ -2902,7 +2902,7 @@ per `agent-recall-resume-restore-preferences'."
       (agent-recall--continue-transcript-on-resume
        shell-buffer session-id transcript-file))
     (when restore
-      (when-let ((effort (alist-get 'effort metadata)))
+      (when-let* ((effort (alist-get 'effort metadata)))
         (agent-recall--restore-thought-level shell-buffer effort))
       (run-hook-with-args 'agent-recall-restore-functions metadata shell-buffer))
     (agent-recall--display-buffer shell-buffer)))
@@ -2942,13 +2942,13 @@ Only shows transcripts that have resolvable session IDs."
                              `(metadata
                                (annotation-function
                                 . ,(lambda (candidate)
-                                     (when-let ((entry (assoc candidate resumable)))
+                                     (when-let* ((entry (assoc candidate resumable)))
                                        (agent-recall--candidate-description
                                         (nth 1 entry) (nth 3 entry))))))
                            (complete-with-action
                             action (mapcar #'car resumable) string pred)))
                        nil t))
-           (entry (or (when-let ((file (agent-recall--candidate-file selection)))
+           (entry (or (when-let* ((file (agent-recall--candidate-file selection)))
                         (seq-find (lambda (e) (equal (nth 1 e) file)) resumable))
                       ;; Fallback for completion UIs that strip text
                       ;; properties from the returned string.
@@ -3146,7 +3146,7 @@ Add to your config:
      :event 'init-session
      :on-event
      (lambda (_event)
-       (when-let ((session-id
+       (when-let* ((session-id
                    (and (buffer-live-p shell-buffer)
                         (buffer-local-value 'agent-shell--state shell-buffer)
                         (map-nested-elt
@@ -3605,7 +3605,7 @@ Results are displayed in the `*agent-recall-backfill*' buffer."
     (let ((session-id (agent-recall--resolve-session-id file)))
       (unless session-id
         (user-error "This transcript has no resumable session ID"))
-      (if-let ((existing (agent-recall--find-session-buffer session-id)))
+      (if-let* ((existing (agent-recall--find-session-buffer session-id)))
           (progn
             (message "Switching to existing buffer: %s" (buffer-name existing))
             (agent-recall--display-buffer existing))
@@ -4009,7 +4009,7 @@ PROGRESS-BUFFER shows status.  TOTAL and DONE track progress."
   "Return the sorted list of distinct project names in the index."
   (let ((projects '()))
     (maphash (lambda (_file entry)
-               (when-let ((project (plist-get entry :project)))
+               (when-let* ((project (plist-get entry :project)))
                  (unless (member project projects)
                    (push project projects))))
              agent-recall--index)
